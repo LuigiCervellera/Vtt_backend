@@ -436,12 +436,26 @@ async def ws_endpoint():
             if msg_type == "JOIN_ROOM" and room_id:
                 current_room = room_id
                 username = payload.get("username", "Anonimo")
+                user_id = payload.get("userId")
+                
+                is_master = False
+                if user_id:
+                    try:
+                        campaign = await Campaign.get_or_none(id=int(room_id))
+                        if campaign and campaign.master_id == user_id:
+                            is_master = True
+                    except Exception:
+                        pass
                 
                 if current_room not in connected_rooms:
                     connected_rooms[current_room] = {}
                 
                 # Aggiunge il WebSocket corrente alla lista della stanza
-                connected_rooms[current_room][ws_obj] = username
+                connected_rooms[current_room][ws_obj] = {
+                    "username": username,
+                    "user_id": user_id,
+                    "is_master": is_master
+                }
                 print(f"-> Utente {username} entrato nella stanza: {current_room}")
                 
                 if current_room not in room_chat_history:
@@ -484,7 +498,7 @@ async def ws_endpoint():
                     await ws_obj.send(map_message)
                 
                 # Broadcast della lista giocatori aggiornata
-                players = list(connected_rooms[current_room].values())
+                players = [info["username"] if isinstance(info, dict) else info for info in connected_rooms[current_room].values()]
                 broadcast_message = json.dumps({
                     "type": "UPDATE_PLAYERS",
                     "payload": {"players": players}
@@ -495,39 +509,69 @@ async def ws_endpoint():
             # 2. GESTIONE MOVIMENTO TOKEN (BROADCAST)
             elif msg_type == "MOVE_TOKEN" and current_room:
                 token_id = payload.get("tokenId")
-                if token_id and current_room in room_tokens:
+                
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                user_id = user_info.get("user_id") if isinstance(user_info, dict) else None
+                
+                is_authorized = False
+                if token_id:
+                    if current_room not in room_tokens:
+                        room_tokens[current_room] = {}
+                    
+                    if token_id not in room_tokens[current_room]:
+                        # Creazione nuovo token: permesso a tutti
+                        is_authorized = True
+                    else:
+                        # Spostamento: permesso al creatore o al master
+                        owner_id = room_tokens[current_room][token_id].get("owner_id")
+                        is_owner = (str(owner_id) == str(user_id)) if owner_id and user_id else False
+                        if is_master or is_owner:
+                            is_authorized = True
+
+                if is_authorized:
                     if token_id not in room_tokens[current_room]:
                         room_tokens[current_room][token_id] = {
                             "color": payload.get("color", 0xa855f7),
-                            "owner_id": payload.get("owner_id")
+                            "owner_id": payload.get("ownerId", payload.get("owner_id"))
                         }
                     room_tokens[current_room][token_id]["x"] = payload.get("x", 0)
                     room_tokens[current_room][token_id]["y"] = payload.get("y", 0)
 
-                targets = connected_rooms.get(current_room, {}).keys()
-                broadcast_message = json.dumps({
-                    "type": "MOVE_TOKEN",
-                    "payload": payload
-                })
-                
-                for client in targets:
-                    if client != ws_obj:
-                        await client.send(broadcast_message)
+                    targets = connected_rooms.get(current_room, {}).keys()
+                    broadcast_message = json.dumps({
+                        "type": "MOVE_TOKEN",
+                        "payload": payload
+                    })
+                    
+                    for client in targets:
+                        if client != ws_obj:
+                            await client.send(broadcast_message)
                         
             # 2.5 REMOVE TOKEN
             elif msg_type == "REMOVE_TOKEN" and current_room:
                 token_id = payload.get("tokenId")
-                if token_id and current_room in room_tokens:
-                    if token_id in room_tokens[current_room]:
-                        del room_tokens[current_room][token_id]
                 
-                targets = connected_rooms.get(current_room, {}).keys()
-                broadcast_message = json.dumps({
-                    "type": "REMOVE_TOKEN",
-                    "payload": {"tokenId": token_id}
-                })
-                for client in targets:
-                    await client.send(broadcast_message)
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                user_id = user_info.get("user_id") if isinstance(user_info, dict) else None
+                
+                if token_id and current_room in room_tokens:
+                    token_data = room_tokens[current_room].get(token_id)
+                    if token_data:
+                        owner_id = token_data.get("owner_id")
+                        is_owner = (str(owner_id) == str(user_id)) if owner_id and user_id else False
+                        
+                        if is_master or is_owner:
+                            del room_tokens[current_room][token_id]
+                            
+                            targets = connected_rooms.get(current_room, {}).keys()
+                            broadcast_message = json.dumps({
+                                "type": "REMOVE_TOKEN",
+                                "payload": {"tokenId": token_id}
+                            })
+                            for client in targets:
+                                await client.send(broadcast_message)
                         
             # 3. CHAT MESSAGE (BROADCAST)
             elif msg_type == "CHAT_MESSAGE" and current_room:
@@ -549,25 +593,48 @@ async def ws_endpoint():
                     
             # 4. GRID SETTINGS (BROADCAST)
             elif msg_type == "GRID_SETTINGS" and current_room:
-                room_grid_settings[current_room] = payload
-                targets = connected_rooms.get(current_room, {}).keys()
-                broadcast_message = json.dumps({
-                    "type": "GRID_SETTINGS",
-                    "payload": payload
-                })
-                for client in targets:
-                    await client.send(broadcast_message)
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    room_grid_settings[current_room] = payload
+                    targets = connected_rooms.get(current_room, {}).keys()
+                    broadcast_message = json.dumps({
+                        "type": "GRID_SETTINGS",
+                        "payload": payload
+                    })
+                    for client in targets:
+                        await client.send(broadcast_message)
 
             # 5. SET MAP (BROADCAST)
             elif msg_type == "SET_MAP" and current_room:
-                room_current_map[current_room] = payload.get("url")
-                targets = connected_rooms.get(current_room, {}).keys()
-                broadcast_message = json.dumps({
-                    "type": "SET_MAP",
-                    "payload": payload
-                })
-                for client in targets:
-                    await client.send(broadcast_message)
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    room_current_map[current_room] = payload.get("url")
+                    targets = connected_rooms.get(current_room, {}).keys()
+                    broadcast_message = json.dumps({
+                        "type": "SET_MAP",
+                        "payload": payload
+                    })
+                    for client in targets:
+                        await client.send(broadcast_message)
+
+            # 6. CLEAR MAP (BROADCAST)
+            elif msg_type == "CLEAR_MAP" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    room_tokens[current_room] = {}
+                    targets = connected_rooms.get(current_room, {}).keys()
+                    broadcast_message = json.dumps({
+                        "type": "CLEAR_MAP",
+                        "payload": {}
+                    })
+                    for client in targets:
+                        await client.send(broadcast_message)
 
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
@@ -578,7 +645,7 @@ async def ws_endpoint():
             connected_rooms[current_room].pop(ws_obj, None)
             print(f"<- Un utente ha lasciato la stanza: {current_room}")
             
-            players = list(connected_rooms[current_room].values())
+            players = [info["username"] if isinstance(info, dict) else info for info in connected_rooms[current_room].values()]
             broadcast_message = json.dumps({
                 "type": "UPDATE_PLAYERS",
                 "payload": {"players": players}
