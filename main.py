@@ -18,13 +18,21 @@ from werkzeug.utils import secure_filename
 from quart import send_from_directory
 
 app = Quart(__name__)
-app = cors(app, allow_origin="*", allow_headers="*", allow_methods="*")  # Configurazione CORS completa
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+app = cors(app, allow_origin=ALLOWED_ORIGINS, allow_headers=["Content-Type", "Authorization"], allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 QuartSchema(app, info={"title": "VTT API", "version": "1.0.0"})
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_WS_MESSAGE_SIZE = 64 * 1024  # 64KB
 
-JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-jwt-key")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    import warnings
+    warnings.warn("JWT_SECRET not set! Using insecure default. Set JWT_SECRET env var in production!", stacklevel=1)
+    JWT_SECRET = "dev-only-insecure-secret-change-me"
 JWT_ALGORITHM = "HS256"
 JWT_EXP_DELTA_SECONDS = 86400 * 30 # 30 giorni
 
@@ -133,6 +141,7 @@ async def uploaded_file(filename):
     return await send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/api/upload-map', methods=['POST'])
+@jwt_required
 async def upload_map():
     files = await request.files
     if 'mapImage' not in files:
@@ -141,15 +150,26 @@ async def upload_map():
     file = files['mapImage']
     if file.filename == '':
         return jsonify({"error": "Nome file vuoto"}), 400
+    
+    # Validazione estensione file
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": f"Tipo file non permesso. Ammessi: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
         
     if file:
+        # Leggi il contenuto per verificare la dimensione
+        file_data = file.read()
+        if len(file_data) > MAX_UPLOAD_SIZE:
+            return jsonify({"error": "File troppo grande. Max 10MB"}), 413
+
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4().hex}_{filename}"
         file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
-        await file.save(file_path)
+        with open(file_path, "wb") as f:
+            f.write(file_data)
         
-        # We return the absolute URL for MVP
-        url = f"http://127.0.0.1:5000/uploads/{unique_filename}"
+        base_url = os.getenv("BASE_URL", "http://127.0.0.1:5000")
+        url = f"{base_url}/uploads/{unique_filename}"
         return jsonify({"url": url}), 200
 
 @app.route("/api/auth/register", methods=["POST"])
@@ -228,10 +248,11 @@ async def logout():
 
 @app.route("/api/auth/update_username", methods=["PUT"])
 @tag(["auth"])
+@jwt_required
 @validate_request(UpdateUsernameRequest)
 async def update_username(data: UpdateUsernameRequest):
     """Modifica username"""
-    user = await User.get_or_none(username=data.username)
+    user = await User.get_or_none(id=g.user["id"])
     
     if not user or not user.check_password(data.current_password):
         return jsonify({"error": "Credenziali attuali non valide"}), 401
@@ -249,10 +270,11 @@ async def update_username(data: UpdateUsernameRequest):
 
 @app.route("/api/auth/update_password", methods=["PUT"])
 @tag(["auth"])
+@jwt_required
 @validate_request(UpdatePasswordRequest)
 async def update_password(data: UpdatePasswordRequest):
     """Modifica password"""
-    user = await User.get_or_none(username=data.username)
+    user = await User.get_or_none(id=g.user["id"])
     
     if not user or not user.check_password(data.current_password):
         return jsonify({"error": "Credenziali attuali non valide"}), 401
@@ -346,17 +368,28 @@ async def leave_campaign(campaign_id: int):
 # --- CRUD MAPS ---
 @app.route("/api/maps", methods=["GET"])
 @tag(["maps"])
+@jwt_required
 async def get_maps():
-    maps = await Map.all().values()
+    user_id = g.user["id"]
+    # Restituisci solo le mappe delle campagne a cui l'utente partecipa
+    user = await User.get(id=user_id).prefetch_related('campaigns_joined')
+    mastered = await Campaign.filter(master_id=user_id).values_list("id", flat=True)
+    joined_ids = [c.id for c in user.campaigns_joined]
+    all_campaign_ids = list(set(mastered + joined_ids))
+    maps = await Map.filter(campagna_id__in=all_campaign_ids).values()
     return jsonify(maps), 200
 
 @app.route("/api/maps", methods=["POST"])
 @tag(["maps"])
+@jwt_required
 @validate_request(MapCreate)
 async def create_map(data: MapCreate):
+    user_id = g.user["id"]
     campaign = await Campaign.get_or_none(id=data.campagna_id)
     if not campaign:
         return jsonify({"error": "Campagna non trovata"}), 404
+    if campaign.master_id != user_id:
+        return jsonify({"error": "Solo il master può creare mappe"}), 403
     m = await Map.create(
         campagna=campaign,
         nome_mappa=data.nome_mappa,
@@ -367,21 +400,33 @@ async def create_map(data: MapCreate):
 
 @app.route("/api/maps/<int:map_id>", methods=["DELETE"])
 @tag(["maps"])
+@jwt_required
 async def delete_map(map_id: int):
-    deleted = await Map.filter(id=map_id).delete()
-    if deleted:
-        return jsonify({"message": "Mappa eliminata"}), 200
-    return jsonify({"error": "Mappa non trovata"}), 404
+    user_id = g.user["id"]
+    m = await Map.get_or_none(id=map_id).prefetch_related("campagna")
+    if not m:
+        return jsonify({"error": "Mappa non trovata"}), 404
+    if m.campagna.master_id != user_id:
+        return jsonify({"error": "Solo il master può eliminare mappe"}), 403
+    await m.delete()
+    return jsonify({"message": "Mappa eliminata"}), 200
 
 # --- CRUD CHARACTERS ---
 @app.route("/api/characters", methods=["GET"])
 @tag(["characters"])
+@jwt_required
 async def get_characters():
-    characters = await Character.all().values()
+    user_id = g.user["id"]
+    user = await User.get(id=user_id).prefetch_related('campaigns_joined')
+    mastered = await Campaign.filter(master_id=user_id).values_list("id", flat=True)
+    joined_ids = [c.id for c in user.campaigns_joined]
+    all_campaign_ids = list(set(mastered + joined_ids))
+    characters = await Character.filter(campagna_id__in=all_campaign_ids).values()
     return jsonify(characters), 200
 
 @app.route("/api/characters", methods=["POST"])
 @tag(["characters"])
+@jwt_required
 @validate_request(CharacterCreate)
 async def create_character(data: CharacterCreate):
     campaign = await Campaign.get_or_none(id=data.campagna_id)
@@ -404,19 +449,59 @@ async def create_character(data: CharacterCreate):
 
 @app.route("/api/characters/<int:character_id>", methods=["DELETE"])
 @tag(["characters"])
+@jwt_required
 async def delete_character(character_id: int):
-    deleted = await Character.filter(id=character_id).delete()
-    if deleted:
-        return jsonify({"message": "Personaggio eliminato"}), 200
-    return jsonify({"error": "Personaggio non trovato"}), 404
+    user_id = g.user["id"]
+    character = await Character.get_or_none(id=character_id).prefetch_related("campagna")
+    if not character:
+        return jsonify({"error": "Personaggio non trovato"}), 404
+    is_master = character.campagna.master_id == user_id
+    is_owner = character.proprietario_id == user_id
+    if not is_master and not is_owner:
+        return jsonify({"error": "Non hai i permessi per eliminare questo personaggio"}), 403
+    await character.delete()
+    return jsonify({"message": "Personaggio eliminato"}), 200
 
 @app.websocket("/ws")
 async def ws_endpoint():
     """
     Questo endpoint gestisce le connessioni WebSocket in tempo reale.
-    Ogni volta che un giocatore si connette, Quart mantiene questa funzione attiva.
+    Richiede autenticazione JWT tramite query parameter ?token=xxx
     """
-    # Accetta la connessione in entrata dal browser del giocatore
+    # Verifica JWT dall'handshake
+    token = websocket.args.get("token")
+    if not token:
+        await websocket.accept()
+        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token mancante"}}))
+        await websocket.close(1008)
+        return
+    
+    try:
+        jwt_payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        await websocket.accept()
+        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token scaduto"}}))
+        await websocket.close(1008)
+        return
+    except jwt.InvalidTokenError:
+        await websocket.accept()
+        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token non valido"}}))
+        await websocket.close(1008)
+        return
+    
+    # Verifica token in Redis (se presente)
+    if redis_client:
+        exists = await redis_client.exists(f"token:{token}")
+        if not exists:
+            await websocket.accept()
+            await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token revocato"}}))
+            await websocket.close(1008)
+            return
+    
+    # Identità verificata dal server, non dal client
+    authenticated_user_id = jwt_payload["id"]
+    authenticated_username = jwt_payload["username"]
+    
     await websocket.accept()
     
     current_room = None
@@ -426,6 +511,12 @@ async def ws_endpoint():
         while True:
             # Rimane in ascolto di nuovi messaggi dal client
             raw_data = await websocket.receive()
+            
+            # Limite dimensione messaggio per prevenire DoS
+            if len(raw_data) > MAX_WS_MESSAGE_SIZE:
+                await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Messaggio troppo grande"}}))
+                continue
+            
             data = json.loads(raw_data)
             
             msg_type = data.get("type")
@@ -435,17 +526,17 @@ async def ws_endpoint():
             # 1. GESTIONE INGRESSO STANZA
             if msg_type == "JOIN_ROOM" and room_id:
                 current_room = room_id
-                username = payload.get("username", "Anonimo")
-                user_id = payload.get("userId")
+                # Usa l'identità verificata dal JWT, ignora userId/username dal client
+                username = authenticated_username
+                user_id = authenticated_user_id
                 
                 is_master = False
-                if user_id:
-                    try:
-                        campaign = await Campaign.get_or_none(id=int(room_id))
-                        if campaign and campaign.master_id == user_id:
-                            is_master = True
-                    except Exception:
-                        pass
+                try:
+                    campaign = await Campaign.get_or_none(id=int(room_id))
+                    if campaign and campaign.master_id == user_id:
+                        is_master = True
+                except Exception:
+                    pass
                 
                 if current_room not in connected_rooms:
                     connected_rooms[current_room] = {}
