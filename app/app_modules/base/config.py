@@ -1,5 +1,10 @@
 import os
 import warnings
+from dotenv import load_dotenv
+
+# Carica le variabili dal file .env se presente
+load_dotenv()
+
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))

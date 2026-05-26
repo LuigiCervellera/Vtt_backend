@@ -1,6 +1,10 @@
 import asyncio
 import os
+from dotenv import load_dotenv
 from tortoise import Tortoise
+
+load_dotenv()
+
 
 async def init_db():
     db_url = os.getenv("DATABASE_URL", "postgres://postgres:admin@localhost:5432/vtt_db")
