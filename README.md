@@ -22,3 +22,22 @@ docker compose up -d --build
 
 # Vedi i logs
 docker compose logs -f backend
+
+
+### Struttura del progetto
+Vtt_backend/
+├── app.py              # Entry point Flask
+├── models.py           # Modelli DB (SQLAlchemy)
+├── routes/             # Endpoint API (Auth, Maps, Users)
+├── ws/                 # Gestione WebSocket (Game Logic)
+├── uploads/            # File caricati (Mappe/Immagini)
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+
+
+
+### Note per lo sviluppo
+- Database: I dati persistono nel volume Docker postgres_data.
+- Env Variables: Mai committare il file .env. È in .gitignore.
+- Migrazione: Da SQLite a Postgres completata. Usare psycopg2-binary
