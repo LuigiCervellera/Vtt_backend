@@ -2,16 +2,10 @@ import json
 import asyncio
 import jwt
 from quart import Blueprint, websocket
-from models import Campaign
+from models import Campaign, User
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM, MAX_WS_MESSAGE_SIZE
+from app.app_modules.auth.blacklist import is_blacklisted
 
-
-def check_auth(token: str) -> bool:
-    try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return True
-    except Exception:
-        return False
 
 ws_bp = Blueprint("ws", __name__)
 
@@ -21,6 +15,55 @@ room_chat_history = {}
 room_grid_settings = {}
 room_current_map = {}
 room_tokens = {}
+
+
+async def _broadcast(room_id: str, message: str, exclude=None):
+    """
+    Invia un messaggio a tutti i client nella stanza.
+    Rimuove automaticamente i client disconnessi.
+    """
+    if room_id not in connected_rooms:
+        return
+    
+    stale_clients = []
+    for client in list(connected_rooms[room_id].keys()):
+        if client == exclude:
+            continue
+        try:
+            await client.send(message)
+        except Exception:
+            stale_clients.append(client)
+    
+    # Pulizia client disconnessi
+    for client in stale_clients:
+        connected_rooms[room_id].pop(client, None)
+
+
+async def _check_campaign_membership(user_id: int, campaign_id: int) -> tuple[bool, bool]:
+    """
+    Verifica se l'utente è membro della campagna.
+    Ritorna (is_member, is_master).
+    """
+    try:
+        campaign = await Campaign.get_or_none(id=campaign_id)
+        if not campaign:
+            return False, False
+        
+        is_master = campaign.master_id == user_id
+        if is_master:
+            return True, True
+        
+        # Verifica se è partecipante
+        user = await User.get_or_none(id=user_id)
+        if not user:
+            return False, False
+        
+        participants = await campaign.partecipanti.all()
+        is_participant = any(p.id == user_id for p in participants)
+        return is_participant, False
+    except Exception:
+        return False, False
+
 
 @ws_bp.websocket("/ws")
 async def ws_endpoint():
@@ -48,9 +91,15 @@ async def ws_endpoint():
         await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token non valido"}}))
         await websocket.close(1008)
         return
-    
 
-    
+    # Verifica che il token non sia stato revocato (logout)
+    jti = jwt_payload.get("jti")
+    if jti and is_blacklisted(jti):
+        await websocket.accept()
+        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token revocato"}}))
+        await websocket.close(1008)
+        return
+
     # Identità verificata dal server, non dal client
     authenticated_user_id = jwt_payload["id"]
     authenticated_username = jwt_payload["username"]
@@ -78,18 +127,27 @@ async def ws_endpoint():
             
             # 1. GESTIONE INGRESSO STANZA
             if msg_type == "JOIN_ROOM" and room_id:
-                current_room = room_id
                 # Usa l'identità verificata dal JWT, ignora userId/username dal client
                 username = authenticated_username
                 user_id = authenticated_user_id
                 
-                is_master = False
+                # Verifica che l'utente sia membro della campagna
                 try:
-                    campaign = await Campaign.get_or_none(id=int(room_id))
-                    if campaign and campaign.master_id == user_id:
-                        is_master = True
-                except Exception:
-                    pass
+                    campaign_id = int(room_id)
+                except (ValueError, TypeError):
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "ID campagna non valido"}}))
+                    continue
+
+                is_member, is_master = await _check_campaign_membership(user_id, campaign_id)
+                if not is_member:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Non sei membro di questa campagna"}
+                    }))
+                    await ws_obj.close(4003)
+                    return
+                
+                current_room = room_id
                 
                 if current_room not in connected_rooms:
                     connected_rooms[current_room] = {}
@@ -147,17 +205,10 @@ async def ws_endpoint():
                     "type": "UPDATE_PLAYERS",
                     "payload": {"players": players}
                 })
-                for client in list(connected_rooms[current_room].keys()):
-                    try:
-                        await client.send(broadcast_message)
-                    except Exception:
-                        pass
+                await _broadcast(current_room, broadcast_message)
             
             # 2. GESTIONE MOVIMENTO TOKEN (BROADCAST)
             elif msg_type == "MOVE_TOKEN" and current_room:
-                if not check_auth(token):
-                    return
-
                 token_id = payload.get("tokenId")
                 
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
@@ -199,18 +250,11 @@ async def ws_endpoint():
                     if "ownerId" not in payload and "owner_id" in token_data:
                         payload["ownerId"] = token_data["owner_id"]
 
-                    targets = connected_rooms.get(current_room, {}).keys()
                     broadcast_message = json.dumps({
                         "type": "MOVE_TOKEN",
                         "payload": payload
                     })
-                    
-                    for client in list(targets):
-                        if client != ws_obj:
-                            try:
-                                await client.send(broadcast_message)
-                            except Exception:
-                                pass
+                    await _broadcast(current_room, broadcast_message, exclude=ws_obj)
                 else:
                     # Notifica il client del fallimento dell'autorizzazione
                     await ws_obj.send(json.dumps({
@@ -241,16 +285,11 @@ async def ws_endpoint():
                         if is_master or is_owner:
                             del room_tokens[current_room][token_id]
                             
-                            targets = connected_rooms.get(current_room, {}).keys()
                             broadcast_message = json.dumps({
                                 "type": "REMOVE_TOKEN",
                                 "payload": {"tokenId": token_id}
                             })
-                            for client in list(targets):
-                                try:
-                                    await client.send(broadcast_message)
-                                except Exception:
-                                    pass
+                            await _broadcast(current_room, broadcast_message)
                         else:
                             await ws_obj.send(json.dumps({
                                 "type": "ERROR",
@@ -265,22 +304,22 @@ async def ws_endpoint():
             elif msg_type == "CHAT_MESSAGE" and current_room:
                 if current_room not in room_chat_history:
                     room_chat_history[current_room] = []
+
+                # Forza l'identità dal JWT — ignora username/userId dal client
+                payload["username"] = authenticated_username
+                payload["userId"] = authenticated_user_id
+
                 room_chat_history[current_room].append(payload)
                 if len(room_chat_history[current_room]) > 100:
                     room_chat_history[current_room] = room_chat_history[current_room][-100:]
                     
-                targets = connected_rooms.get(current_room, {}).keys()
                 broadcast_message = json.dumps({
                     "type": "CHAT_MESSAGE",
                     "payload": payload
                 })
                 
                 # Invia a tutti, compreso il mittente, così si assicura che sia stato ricevuto
-                for client in list(targets):
-                    try:
-                        await client.send(broadcast_message)
-                    except Exception:
-                        pass
+                await _broadcast(current_room, broadcast_message)
                     
             # 4. GRID SETTINGS (BROADCAST)
             elif msg_type == "GRID_SETTINGS" and current_room:
@@ -289,16 +328,11 @@ async def ws_endpoint():
                 
                 if is_master:
                     room_grid_settings[current_room] = payload
-                    targets = connected_rooms.get(current_room, {}).keys()
                     broadcast_message = json.dumps({
                         "type": "GRID_SETTINGS",
                         "payload": payload
                     })
-                    for client in list(targets):
-                        try:
-                            await client.send(broadcast_message)
-                        except Exception:
-                            pass
+                    await _broadcast(current_room, broadcast_message)
  
             # 5. SET MAP (BROADCAST)
             elif msg_type == "SET_MAP" and current_room:
@@ -307,16 +341,11 @@ async def ws_endpoint():
                 
                 if is_master:
                     room_current_map[current_room] = payload.get("url")
-                    targets = connected_rooms.get(current_room, {}).keys()
                     broadcast_message = json.dumps({
                         "type": "SET_MAP",
                         "payload": payload
                     })
-                    for client in list(targets):
-                        try:
-                            await client.send(broadcast_message)
-                        except Exception:
-                            pass
+                    await _broadcast(current_room, broadcast_message)
   
             # 6. CLEAR MAP (BROADCAST)
             elif msg_type == "CLEAR_MAP" and current_room:
@@ -325,16 +354,11 @@ async def ws_endpoint():
                 
                 if is_master:
                     room_tokens[current_room] = {}
-                    targets = connected_rooms.get(current_room, {}).keys()
                     broadcast_message = json.dumps({
                         "type": "CLEAR_MAP",
                         "payload": {}
                     })
-                    for client in list(targets):
-                        try:
-                            await client.send(broadcast_message)
-                        except Exception:
-                            pass
+                    await _broadcast(current_room, broadcast_message)
   
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
@@ -350,11 +374,8 @@ async def ws_endpoint():
                 "type": "UPDATE_PLAYERS",
                 "payload": {"players": players}
             })
-            for client in list(connected_rooms[current_room].keys()):
-                try:
-                    await client.send(broadcast_message)
-                except Exception:
-                    pass
+            await _broadcast(current_room, broadcast_message)
                 
             if not connected_rooms[current_room]:
                 del connected_rooms[current_room]
+

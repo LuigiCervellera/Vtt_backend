@@ -1,12 +1,48 @@
 import os
 import uuid
-from quart import Blueprint, jsonify, request, g, send_from_directory
+import jwt
+from quart import Blueprint, jsonify, request, g, send_from_directory, make_response
 from quart_schema import validate_request, tag
 from werkzeug.utils import secure_filename
 from models import Map, Campaign, User
 from app.app_modules.auth.decorators import jwt_required
 from app.app_modules.maps.schemas import MapCreate
-from app.app_modules.base.config import UPLOAD_FOLDER, ALLOWED_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.app_modules.base.config import (
+    UPLOAD_FOLDER, ALLOWED_EXTENSIONS, MAX_UPLOAD_SIZE,
+    JWT_SECRET, JWT_ALGORITHM,
+)
+from app.app_modules.auth.blacklist import is_blacklisted
+
+# Magic bytes per validazione contenuto file
+_IMAGE_SIGNATURES = {
+    b'\x89PNG\r\n\x1a\n': 'png',          # PNG
+    b'\xff\xd8\xff': 'jpg',                 # JPEG
+    b'RIFF': 'webp',                        # WebP (RIFF container)
+}
+
+
+def _validate_image_magic_bytes(file_data: bytes) -> str | None:
+    """
+    Verifica i magic bytes del file e ritorna l'estensione reale.
+    Ritorna None se il file non è un'immagine valida.
+    """
+    for signature, ext in _IMAGE_SIGNATURES.items():
+        if file_data[:len(signature)] == signature:
+            # Per WebP, verifica anche che contenga "WEBP" all'offset 8
+            if ext == 'webp':
+                if len(file_data) >= 12 and file_data[8:12] == b'WEBP':
+                    return ext
+                continue
+            return ext
+    return None
+
+
+_EXT_TO_MIMETYPE = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'webp': 'image/webp',
+}
 
 maps_bp = Blueprint("maps", __name__)
 
@@ -57,7 +93,35 @@ async def delete_map(map_id: int):
 
 @maps_bp.route('/uploads/<filename>', methods=['GET'])
 async def uploaded_file(filename):
-    return await send_from_directory(UPLOAD_FOLDER, filename)
+    """
+    Serve i file caricati, protetto da JWT via query parameter.
+    Uso: /uploads/file.png?token=xxx
+    Compatibile con <img src="..."> e PixiJS.
+    """
+    token = request.args.get("token")
+    if not token:
+        return jsonify({"error": "Token mancante"}), 401
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        jti = payload.get("jti")
+        if jti and is_blacklisted(jti):
+            return jsonify({"error": "Token revocato"}), 401
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token scaduto"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token non valido"}), 401
+
+    # Determina il Content-Type corretto dall'estensione
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type = _EXT_TO_MIMETYPE.get(ext, "application/octet-stream")
+
+    response = await make_response(
+        await send_from_directory(UPLOAD_FOLDER, filename)
+    )
+    response.headers["Content-Type"] = content_type
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 @maps_bp.route('/api/upload-map', methods=['POST'])
 @jwt_required
@@ -81,6 +145,11 @@ async def upload_map():
         if len(file_data) > MAX_UPLOAD_SIZE:
             return jsonify({"error": "File troppo grande. Max 5MB"}), 413
 
+        # Validazione magic bytes — verifica che il contenuto sia un'immagine reale
+        detected_ext = _validate_image_magic_bytes(file_data)
+        if detected_ext is None:
+            return jsonify({"error": "Il file non è un'immagine valida. Il contenuto non corrisponde a PNG, JPEG o WebP"}), 400
+
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4().hex}_{filename}"
         file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
@@ -90,3 +159,4 @@ async def upload_map():
         base_url = os.getenv("BASE_URL", "http://127.0.0.1:5000")
         url = f"{base_url}/uploads/{unique_filename}"
         return jsonify({"url": url}), 200
+

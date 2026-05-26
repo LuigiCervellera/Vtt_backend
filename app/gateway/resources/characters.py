@@ -23,10 +23,24 @@ async def get_characters():
 @jwt_required
 @validate_request(CharacterCreate)
 async def create_character(data: CharacterCreate):
+    user_id = g.user["id"]
     campaign = await Campaign.get_or_none(id=data.campagna_id)
     if not campaign:
         return jsonify({"error": "Campagna non trovata"}), 404
-    
+
+    # Verifica che l'utente sia membro della campagna (master o partecipante)
+    is_member = False
+    if campaign.master_id == user_id:
+        is_member = True
+    else:
+        user = await User.get_or_none(id=user_id)
+        if user:
+            participants = await campaign.partecipanti.all()
+            is_member = any(p.id == user_id for p in participants)
+
+    if not is_member:
+        return jsonify({"error": "Non sei membro di questa campagna"}), 403
+
     proprietario = None
     if data.proprietario_id:
         proprietario = await User.get_or_none(id=data.proprietario_id)

@@ -2,6 +2,7 @@ import jwt
 from functools import wraps
 from quart import request, jsonify, g
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM
+from app.app_modules.auth.blacklist import is_blacklisted
 
 
 def jwt_required(f):
@@ -15,6 +16,10 @@ def jwt_required(f):
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 
+            # Verifica che il token non sia stato revocato (logout)
+            jti = payload.get("jti")
+            if jti and is_blacklisted(jti):
+                return jsonify({"error": "Token revocato"}), 401
             
             g.user = payload
         except jwt.ExpiredSignatureError:
@@ -24,3 +29,4 @@ def jwt_required(f):
             
         return await f(*args, **kwargs)
     return decorated
+

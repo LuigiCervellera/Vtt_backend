@@ -1,3 +1,5 @@
+import uuid
+
 from quart import Blueprint, jsonify, g
 from quart_schema import validate_request, tag
 from models import Campaign, User
@@ -28,12 +30,14 @@ async def create_campaign(data: CampaignCreate):
     if not master:
         return jsonify({"error": "Master non trovato"}), 404
     try:
+        # Genera codice invito sicuro lato server (8 caratteri hex)
+        codice_invito = uuid.uuid4().hex[:8]
         campaign = await Campaign.create(
             nome_campagna=data.nome_campagna,
-            codice_invito=data.codice_invito,
+            codice_invito=codice_invito,
             master=master
         )
-        return jsonify({"message": "Campagna creata", "id": campaign.id}), 201
+        return jsonify({"message": "Campagna creata", "id": campaign.id, "codice_invito": codice_invito}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 

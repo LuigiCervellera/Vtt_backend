@@ -4,3 +4,5 @@ uploads/*
 .env
 .env.*
 .env
+venv/
+__pycache__/
