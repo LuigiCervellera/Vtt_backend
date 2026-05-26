@@ -5,7 +5,7 @@ Il backend per **WizVTT** (Virtual Tabletop), un'applicazione per giochi di ruol
 ## Stack Tecnologico
 
 - **Framework Web**: [Quart](https://pgjones.gitlab.io/quart/)
-- **Database ORM**: [Tortoise ORM](https://tortoise.github.io/) (supporta SQLite e PostgreSQL)
+- **Database ORM**: [Tortoise ORM](https://tortoise.github.io/) con driver asincrono `asyncpg` per **PostgreSQL**
 - **Real-time / WebSocket**: Gestiti nativamente da Quart
 - **Gestione Stato in tempo reale**: In memoria via WebSocket (con dizionari Python standard)
 - **Gestione Auth**: JWT (JSON Web Tokens)
@@ -13,7 +13,7 @@ Il backend per **WizVTT** (Virtual Tabletop), un'applicazione per giochi di ruol
 ## Prerequisiti
 
 - Python 3.10 o superiore
-- (Opzionale) PostgreSQL se non si utilizza SQLite
+- **PostgreSQL** 15+ (in locale o tramite Docker)
 
 ## Installazione
 
@@ -45,8 +45,18 @@ Il progetto utilizza un file `.env` per la gestione dei segreti e delle configur
 2. Apri il file `.env` appena creato e verifica o modifica le variabili:
    - `ALLOWED_ORIGINS`: URL del frontend (es. `http://localhost:5173`)
    - `JWT_SECRET`: Chiave segreta per cifrare i token JWT (cambiarla in produzione!)
-   - `DATABASE_URL`: Stringa di connessione al DB (es. `sqlite:///percorso/assoluto/db.sqlite3` oppure `postgres://user:pass@localhost:5432/vtt_db`)
+   - `DATABASE_URL`: Stringa di connessione al DB PostgreSQL (es. `postgres://postgres:postgres@localhost:5432/vtt_db`)
    - `BASE_URL`: URL base del backend, utilizzato per costruire i link alle mappe caricate
+
+### Avvio Rapido del Database con Docker (Consigliato per Sviluppo)
+
+Se hai Docker installato sul tuo sistema, puoi avviare un database PostgreSQL locale già configurato eseguendo nella cartella del progetto:
+
+```bash
+docker compose up -d
+```
+
+Questo avvierà un'istanza PostgreSQL ascoltando sulla porta `5432` con credenziali preconfigurate corrispondenti a quelle presenti nel file `.env.example`.
 
 ## Inizializzazione del Database
 
