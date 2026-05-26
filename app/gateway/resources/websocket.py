@@ -6,6 +6,13 @@ from models import Campaign
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM, MAX_WS_MESSAGE_SIZE
 
 
+def check_auth(token: str) -> bool:
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return True
+    except Exception:
+        return False
+
 ws_bp = Blueprint("ws", __name__)
 
 # State dictionaries for real-time rooms
@@ -148,6 +155,9 @@ async def ws_endpoint():
             
             # 2. GESTIONE MOVIMENTO TOKEN (BROADCAST)
             elif msg_type == "MOVE_TOKEN" and current_room:
+                if not check_auth(token):
+                    return
+
                 token_id = payload.get("tokenId")
                 
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
