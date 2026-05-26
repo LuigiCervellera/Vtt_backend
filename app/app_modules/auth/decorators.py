@@ -2,7 +2,7 @@ import jwt
 from functools import wraps
 from quart import request, jsonify, g
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM
-from app.app_modules.base.redis_client import redis_manager
+
 
 def jwt_required(f):
     @wraps(f)
@@ -14,11 +14,7 @@ def jwt_required(f):
         token = auth_header.split(" ")[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-            # Check redis
-            if redis_manager.client:
-                exists = await redis_manager.client.exists(f"token:{token}")
-                if not exists:
-                    return jsonify({"error": "Token revocato o non valido"}), 401
+
             
             g.user = payload
         except jwt.ExpiredSignatureError:

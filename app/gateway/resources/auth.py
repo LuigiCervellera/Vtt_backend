@@ -6,7 +6,7 @@ from models import User
 from app.app_modules.auth.decorators import jwt_required
 from app.app_modules.auth.schemas import AuthRequest, UpdateUsernameRequest, UpdatePasswordRequest
 from app.app_modules.base.config import JWT_EXP_DELTA_SECONDS, JWT_SECRET, JWT_ALGORITHM
-from app.app_modules.base.redis_client import redis_manager
+
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -51,8 +51,7 @@ async def login(data: AuthRequest):
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
         
-        if redis_manager.client:
-            await redis_manager.client.set(f"token:{token}", user.id, ex=JWT_EXP_DELTA_SECONDS)
+
         
         return jsonify({
             "message": "Login effettuato", 
@@ -80,8 +79,7 @@ async def logout():
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
-        if redis_manager.client:
-            await redis_manager.client.delete(f"token:{token}")
+
     return jsonify({"message": "Logout effettuato con successo"}), 200
 
 @auth_bp.route("/update_username", methods=["PUT"])

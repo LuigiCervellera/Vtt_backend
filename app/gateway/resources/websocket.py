@@ -4,7 +4,7 @@ import jwt
 from quart import Blueprint, websocket
 from models import Campaign
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM, MAX_WS_MESSAGE_SIZE
-from app.app_modules.base.redis_client import redis_manager
+
 
 ws_bp = Blueprint("ws", __name__)
 
@@ -42,14 +42,7 @@ async def ws_endpoint():
         await websocket.close(1008)
         return
     
-    # Verifica token in Redis (se presente)
-    if redis_manager.client:
-        exists = await redis_manager.client.exists(f"token:{token}")
-        if not exists:
-            await websocket.accept()
-            await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token revocato"}}))
-            await websocket.close(1008)
-            return
+
     
     # Identità verificata dal server, non dal client
     authenticated_user_id = jwt_payload["id"]

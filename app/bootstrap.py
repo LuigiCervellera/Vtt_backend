@@ -3,7 +3,7 @@ from quart_cors import cors
 from quart_schema import QuartSchema
 from app.app_modules.base.config import ALLOWED_ORIGINS
 from app.app_modules.base.database import init_tortoise, close_tortoise
-from app.app_modules.base.redis_client import redis_manager
+
 
 # Blueprints
 from app.gateway.resources.auth import auth_bp
@@ -41,15 +41,13 @@ def create_app() -> Quart:
     # Lifecycle Hooks
     @app.before_serving
     async def startup():
-        # Init Redis connection
-        await redis_manager.init()
+
         # Init Tortoise ORM connection
         await init_tortoise()
         
     @app.after_serving
     async def shutdown():
-        # Close Redis connection
-        await redis_manager.close()
+
         # Close Tortoise ORM connection
         await close_tortoise()
         
