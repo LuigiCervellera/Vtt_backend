@@ -12,5 +12,23 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  backend:
+    build: .
+    container_name: vtt_backend
+    restart: always
+    env_file:
+      - .env
+    environment:
+      # Override di DATABASE_URL per far puntare il backend al container del DB
+      # (all'interno della rete docker, il DB risponde all'hostname 'db', non 'localhost')
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - db
+    volumes:
+      # Monta la cartella uploads persistente anche all'esterno
+      - ./uploads:/app/uploads
+
 volumes:
   postgres_data:
