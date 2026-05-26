@@ -15,8 +15,8 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
 
 # File uploads and limitations
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_WS_MESSAGE_SIZE = 64 * 1024  # 64KB
 
 # JWT configuration

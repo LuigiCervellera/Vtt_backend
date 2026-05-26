@@ -79,7 +79,7 @@ async def upload_map():
         # Leggi il contenuto per verificare la dimensione
         file_data = file.read()
         if len(file_data) > MAX_UPLOAD_SIZE:
-            return jsonify({"error": "File troppo grande. Max 10MB"}), 413
+            return jsonify({"error": "File troppo grande. Max 5MB"}), 413
 
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4().hex}_{filename}"
