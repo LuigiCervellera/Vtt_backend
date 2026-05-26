@@ -148,7 +148,10 @@ async def ws_endpoint():
                     "payload": {"players": players}
                 })
                 for client in list(connected_rooms[current_room].keys()):
-                    await client.send(broadcast_message)
+                    try:
+                        await client.send(broadcast_message)
+                    except Exception:
+                        pass
             
             # 2. GESTIONE MOVIMENTO TOKEN (BROADCAST)
             elif msg_type == "MOVE_TOKEN" and current_room:
@@ -164,8 +167,11 @@ async def ws_endpoint():
                         room_tokens[current_room] = {}
                     
                     if token_id not in room_tokens[current_room]:
-                        # Creazione nuovo token: permesso a tutti
+                        # Creazione nuovo token: permesso a tutti, ma sanifichiamo l'owner_id per i player non-master
                         is_authorized = True
+                        if not is_master:
+                            payload["ownerId"] = user_id
+                            payload["owner_id"] = user_id
                     else:
                         # Spostamento: permesso al creatore o al master
                         owner_id = room_tokens[current_room][token_id].get("owner_id")
@@ -175,9 +181,10 @@ async def ws_endpoint():
 
                 if is_authorized:
                     if token_id not in room_tokens[current_room]:
+                        new_owner_id = payload.get("ownerId", payload.get("owner_id"))
                         room_tokens[current_room][token_id] = {
                             "color": payload.get("color", 0xa855f7),
-                            "owner_id": payload.get("ownerId", payload.get("owner_id"))
+                            "owner_id": new_owner_id
                         }
                     room_tokens[current_room][token_id]["x"] = payload.get("x", 0)
                     room_tokens[current_room][token_id]["y"] = payload.get("y", 0)
@@ -195,9 +202,24 @@ async def ws_endpoint():
                         "payload": payload
                     })
                     
-                    for client in targets:
+                    for client in list(targets):
                         if client != ws_obj:
-                            await client.send(broadcast_message)
+                            try:
+                                await client.send(broadcast_message)
+                            except Exception:
+                                pass
+                else:
+                    # Notifica il client del fallimento dell'autorizzazione
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Non autorizzato a muovere questo token"}
+                    }))
+                    # Forza un sync dei token per ripristinare lo stato corretto sul client
+                    if current_room in room_tokens:
+                        await ws_obj.send(json.dumps({
+                            "type": "SYNC_TOKENS",
+                            "payload": {"tokens": room_tokens[current_room]}
+                        }))
                         
             # 2.5 REMOVE TOKEN
             elif msg_type == "REMOVE_TOKEN" and current_room:
@@ -221,8 +243,20 @@ async def ws_endpoint():
                                 "type": "REMOVE_TOKEN",
                                 "payload": {"tokenId": token_id}
                             })
-                            for client in targets:
-                                await client.send(broadcast_message)
+                            for client in list(targets):
+                                try:
+                                    await client.send(broadcast_message)
+                                except Exception:
+                                    pass
+                        else:
+                            await ws_obj.send(json.dumps({
+                                "type": "ERROR",
+                                "payload": {"message": "Non autorizzato a rimuovere questo token"}
+                            }))
+                            await ws_obj.send(json.dumps({
+                                "type": "SYNC_TOKENS",
+                                "payload": {"tokens": room_tokens[current_room]}
+                            }))
                         
             # 3. CHAT MESSAGE (BROADCAST)
             elif msg_type == "CHAT_MESSAGE" and current_room:
@@ -239,8 +273,11 @@ async def ws_endpoint():
                 })
                 
                 # Invia a tutti, compreso il mittente, così si assicura che sia stato ricevuto
-                for client in targets:
-                    await client.send(broadcast_message)
+                for client in list(targets):
+                    try:
+                        await client.send(broadcast_message)
+                    except Exception:
+                        pass
                     
             # 4. GRID SETTINGS (BROADCAST)
             elif msg_type == "GRID_SETTINGS" and current_room:
@@ -254,8 +291,11 @@ async def ws_endpoint():
                         "type": "GRID_SETTINGS",
                         "payload": payload
                     })
-                    for client in targets:
-                        await client.send(broadcast_message)
+                    for client in list(targets):
+                        try:
+                            await client.send(broadcast_message)
+                        except Exception:
+                            pass
  
             # 5. SET MAP (BROADCAST)
             elif msg_type == "SET_MAP" and current_room:
@@ -269,9 +309,12 @@ async def ws_endpoint():
                         "type": "SET_MAP",
                         "payload": payload
                     })
-                    for client in targets:
-                        await client.send(broadcast_message)
- 
+                    for client in list(targets):
+                        try:
+                            await client.send(broadcast_message)
+                        except Exception:
+                            pass
+  
             # 6. CLEAR MAP (BROADCAST)
             elif msg_type == "CLEAR_MAP" and current_room:
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
@@ -284,12 +327,15 @@ async def ws_endpoint():
                         "type": "CLEAR_MAP",
                         "payload": {}
                     })
-                    for client in targets:
-                        await client.send(broadcast_message)
- 
+                    for client in list(targets):
+                        try:
+                            await client.send(broadcast_message)
+                        except Exception:
+                            pass
+  
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
-        pass
+        raise
     finally:
         # Se il giocatore si disconnette, lo rimuoviamo dalla stanza
         if current_room and current_room in connected_rooms:
@@ -302,7 +348,10 @@ async def ws_endpoint():
                 "payload": {"players": players}
             })
             for client in list(connected_rooms[current_room].keys()):
-                await client.send(broadcast_message)
+                try:
+                    await client.send(broadcast_message)
+                except Exception:
+                    pass
                 
             if not connected_rooms[current_room]:
                 del connected_rooms[current_room]
