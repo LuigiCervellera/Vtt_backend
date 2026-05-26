@@ -10,11 +10,11 @@ class User(Model):
     created_at = fields.DatetimeField(auto_now_add=True)
 
     # Relazioni
-    campaigns_mastered = fields.ReverseRelation["Campaign"]
-    campaigns_joined = fields.ManyToManyRelation["Campaign"]
-    characters = fields.ReverseRelation["Character"]
+    campaigns_mastered: fields.ReverseRelation["Campaign"]
+    campaigns_joined: fields.ManyToManyRelation["Campaign"]
+    characters: fields.ReverseRelation["Character"]
 
-    class Meta:
+    class Meta:  # type: ignore
         table = "users"
 
     def set_password(self, password: str):
@@ -33,14 +33,16 @@ class Campaign(Model):
     master: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
         "models.User", related_name="campaigns_mastered"
     )
+    master_id: int
+
     partecipanti: fields.ManyToManyRelation[User] = fields.ManyToManyField(
         "models.User", related_name="campaigns_joined", through="partecipanti_campagna"
     )
 
-    maps = fields.ReverseRelation["Map"]
-    characters = fields.ReverseRelation["Character"]
+    maps: fields.ReverseRelation["Map"]
+    characters: fields.ReverseRelation["Character"]
 
-    class Meta:
+    class Meta:  # type: ignore
         table = "campaigns"
 
     def __str__(self):
@@ -51,11 +53,12 @@ class Map(Model):
     campagna: fields.ForeignKeyRelation[Campaign] = fields.ForeignKeyField(
         "models.Campaign", related_name="maps"
     )
+    campagna_id: int
     nome_mappa = fields.CharField(max_length=255)
     url_immagine = fields.CharField(max_length=1024)
     is_active = fields.BooleanField(default=False)
 
-    class Meta:
+    class Meta:  # type: ignore
         table = "maps"
 
     def __str__(self):
@@ -66,15 +69,17 @@ class Character(Model):
     campagna: fields.ForeignKeyRelation[Campaign] = fields.ForeignKeyField(
         "models.Campaign", related_name="characters"
     )
+    campagna_id: int
     nome = fields.CharField(max_length=255)
     is_npc = fields.BooleanField(default=False)
-    proprietario: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
+    proprietario: fields.ForeignKeyRelation[User] | None = fields.ForeignKeyField(
         "models.User", related_name="characters", null=True
     )
+    proprietario_id: int | None
     url_avatar = fields.CharField(max_length=1024, null=True)
     scheda_dati = fields.JSONField(default=dict)
 
-    class Meta:
+    class Meta:  # type: ignore
         table = "characters"
 
     def __str__(self):
