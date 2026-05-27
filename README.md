@@ -19,12 +19,46 @@ API REST + WebSocket server per gestire sessioni di gioco, mappe e token in temp
 
 ### Avvio
 
+Per avviare il backend è necessario utilizzare Docker.
+
+Con **Docker Compose** (Consigliato, avvia sia il backend che il DB):
+
 ```bash
 # Avvia DB e Backend
-docker compose up -d --build
+docker compose up -d
 
 # Vedi i logs
 docker compose logs -f backend
+```
+
+Con **Docker** stand-alone:
+
+```bash
+# Costruisci l'immagine
+docker build -t vtt_backend .
+
+# Avvia il container
+docker run -p 5000:5000 --env-file .env vtt_backend
+```
+
+### Se vedi un errore simile
+
+```bash
+unable to get image 'postgres:16-alpine': permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+```
+
+## Risolvi cosi
+
+```bash
+newgrp docker
+#e poi riprova
+docker compose up -d
+```
+
+## In casi estremi
+
+```bash
+sudo docker compose up -d
 ```
 
 ### Struttura del progetto

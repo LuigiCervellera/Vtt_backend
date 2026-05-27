@@ -195,7 +195,7 @@ async def ws_endpoint():
                     await ws_obj.send(map_message)
                 
                 # Broadcast della lista giocatori aggiornata
-                players = [info["username"] if isinstance(info, dict) else info for info in connected_rooms[current_room].values()]
+                players = [{"username": info["username"], "is_master": info["is_master"]} if isinstance(info, dict) else {"username": info, "is_master": False} for info in connected_rooms[current_room].values()]
                 broadcast_message = json.dumps({
                     "type": "UPDATE_PLAYERS",
                     "payload": {"players": players}
@@ -211,22 +211,38 @@ async def ws_endpoint():
                 user_id = user_info.get("user_id") if isinstance(user_info, dict) else None
                 
                 is_authorized = False
-                if token_id:
+                if token_id and isinstance(token_id, str) and len(token_id) <= 50:
                     if current_room not in room_tokens:
                         room_tokens[current_room] = {}
                     
-                    if token_id not in room_tokens[current_room]:
-                        # Creazione nuovo token: permesso a tutti, ma sanifichiamo l'owner_id per i player non-master
-                        is_authorized = True
-                        if not is_master:
-                            payload["ownerId"] = user_id
-                            payload["owner_id"] = user_id
-                    else:
-                        # Spostamento: permesso al creatore o al master
-                        owner_id = room_tokens[current_room][token_id].get("owner_id")
-                        is_owner = (str(owner_id) == str(user_id)) if owner_id and user_id else False
-                        if is_master or is_owner:
-                            is_authorized = True
+                    # Sanifica coordinate x, y per evitare valori estremi
+                    x_val = payload.get("x", 0)
+                    y_val = payload.get("y", 0)
+                    if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
+                        if -10000 <= x_val <= 10000 and -10000 <= y_val <= 10000:
+                            if token_id not in room_tokens[current_room]:
+                                # Creazione nuovo token
+                                # Preventivo DoS: limite massimo di token per stanza
+                                if len(room_tokens[current_room]) < 200:
+                                    if not is_master:
+                                        # I player semplici possono creare al massimo 3 token
+                                        owned_count = sum(
+                                            1 for t in room_tokens[current_room].values()
+                                            if str(t.get("owner_id")) == str(user_id)
+                                        )
+                                        if owned_count < 3:
+                                            is_authorized = True
+                                            payload["ownerId"] = user_id
+                                            payload["owner_id"] = user_id
+                                    else:
+                                        # Il master non ha limiti
+                                        is_authorized = True
+                            else:
+                                # Spostamento token esistente: permesso al proprietario o al master
+                                owner_id = room_tokens[current_room][token_id].get("owner_id")
+                                is_owner = (str(owner_id) == str(user_id)) if owner_id and user_id else False
+                                if is_master or is_owner:
+                                    is_authorized = True
 
                 if is_authorized:
                     if token_id not in room_tokens[current_room]:
@@ -238,12 +254,14 @@ async def ws_endpoint():
                     room_tokens[current_room][token_id]["x"] = payload.get("x", 0)
                     room_tokens[current_room][token_id]["y"] = payload.get("y", 0)
 
-                    # Arricchiamo il payload broadcasted con colore e ownerId per garantire consistenza
+                    # Arricchiamo il payload broadcasted con colore e ownerId per garantire consistenza.
+                    # Forza SEMPRE l'ownerId dello stato del server per prevenire spoofing / furti di token.
                     token_data = room_tokens[current_room][token_id]
                     if "color" not in payload and "color" in token_data:
                         payload["color"] = token_data["color"]
-                    if "ownerId" not in payload and "owner_id" in token_data:
-                        payload["ownerId"] = token_data["owner_id"]
+                    
+                    payload["ownerId"] = token_data.get("owner_id")
+                    payload["owner_id"] = token_data.get("owner_id")
 
                     broadcast_message = json.dumps({
                         "type": "MOVE_TOKEN",
@@ -364,7 +382,7 @@ async def ws_endpoint():
             connected_rooms[current_room].pop(ws_obj, None)
             print(f"<- Un utente ha lasciato la stanza: {current_room}")
             
-            players = [info["username"] if isinstance(info, dict) else info for info in connected_rooms[current_room].values()]
+            players = [{"username": info["username"], "is_master": info["is_master"]} if isinstance(info, dict) else {"username": info, "is_master": False} for info in connected_rooms[current_room].values()]
             broadcast_message = json.dumps({
                 "type": "UPDATE_PLAYERS",
                 "payload": {"players": players}
