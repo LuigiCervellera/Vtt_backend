@@ -33,10 +33,7 @@ async def create_character(data: CharacterCreate):
     if campaign.master_id == user_id:
         is_member = True
     else:
-        user = await User.get_or_none(id=user_id)
-        if user:
-            participants = await campaign.partecipanti.all()
-            is_member = any(p.id == user_id for p in participants)
+        is_member = await campaign.partecipanti.filter(id=user_id).exists()
 
     if not is_member:
         return jsonify({"error": "Non sei membro di questa campagna"}), 403

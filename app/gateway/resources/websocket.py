@@ -53,13 +53,8 @@ async def _check_campaign_membership(user_id: int, campaign_id: int) -> tuple[bo
         if is_master:
             return True, True
         
-        # Verifica se è partecipante
-        user = await User.get_or_none(id=user_id)
-        if not user:
-            return False, False
-        
-        participants = await campaign.partecipanti.all()
-        is_participant = any(p.id == user_id for p in participants)
+        # Usa .filter().exists() invece di .all() — molto più veloce e sicuro
+        is_participant = await campaign.partecipanti.filter(id=user_id).exists()
         return is_participant, False
     except Exception:
         return False, False
