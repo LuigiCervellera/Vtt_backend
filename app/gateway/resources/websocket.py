@@ -346,6 +346,19 @@ async def ws_endpoint():
                         "payload": payload
                     })
                     await _broadcast(current_room, broadcast_message)
+            
+            # 4.5 UPDATE RULER (BROADCAST)
+            elif msg_type == "UPDATE_RULER" and current_room:
+                payload["username"] = authenticated_username
+                payload["userId"] = authenticated_user_id
+                
+                print(f"[RULER] {authenticated_username} in room {current_room}: visible={payload.get('visible')}")
+                
+                broadcast_message = json.dumps({
+                    "type": "UPDATE_RULER",
+                    "payload": payload
+                })
+                await _broadcast(current_room, broadcast_message, exclude=ws_obj)
  
             # 5. SET MAP (BROADCAST)
             elif msg_type == "SET_MAP" and current_room:
