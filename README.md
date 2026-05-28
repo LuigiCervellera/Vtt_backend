@@ -69,6 +69,12 @@ In casi estremi:
 sudo docker compose up -d
 ```
 
+### Se hai bisogno di riavviare il backend a seguito di modifiche al codice
+
+```bash
+docker compose down && docker compose up -d --build
+```
+
 #### 🪟 Su Windows: Errore di connessione al demone
 
 Se in PowerShell/Prompt vedi un errore simile:

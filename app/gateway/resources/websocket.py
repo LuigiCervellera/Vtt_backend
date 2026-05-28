@@ -541,6 +541,19 @@ async def ws_endpoint():
                         "type": "UPDATE_TEMPLATES",
                         "payload": {"templates": room_templates[current_room]}
                     }))
+            
+            # 8. SEND EMOTE (BROADCAST)
+            elif msg_type == "SEND_EMOTE" and current_room:
+                emote = payload.get("emote")
+                if emote and isinstance(emote, str) and len(emote) <= 10:
+                    broadcast_message = json.dumps({
+                        "type": "SEND_EMOTE",
+                        "payload": {
+                            "emote": emote,
+                            "username": authenticated_username
+                        }
+                    })
+                    await _broadcast(current_room, broadcast_message)
   
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
