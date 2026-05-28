@@ -109,3 +109,9 @@ Vtt_backend/
 - Database: I dati persistono nel volume Docker postgres_data.
 - Env Variables: Mai committare il file .env. È in .gitignore.
 - Migrazione: Da SQLite a Postgres completata. Usare psycopg2-binary
+
+---
+
+## ☕ Supporta il Progetto
+
+[![Buy me a coffee](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K8NSM0V)
