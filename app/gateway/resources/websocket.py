@@ -19,6 +19,9 @@ room_grid_settings = {}
 room_current_map = {}
 room_tokens = {}
 room_templates = {}
+room_walls = {}
+room_fow_enabled = {}
+room_los_enabled = {}
 
 
 async def _broadcast(room_id: str, message: str, exclude=None):
@@ -251,6 +254,24 @@ async def ws_endpoint():
                         "payload": {"templates": room_templates[current_room]}
                     })
                     await ws_obj.send(templates_message)
+
+                # Invia i muri correnti se presenti
+                if current_room in room_walls:
+                    walls_message = json.dumps({
+                        "type": "UPDATE_WALLS",
+                        "payload": {"walls": room_walls[current_room]}
+                    })
+                    await ws_obj.send(walls_message)
+
+                # Invia le impostazioni della nebbia di guerra e LoS se presenti
+                fow_message = json.dumps({
+                    "type": "UPDATE_FOW_SETTINGS",
+                    "payload": {
+                        "enabled": room_fow_enabled.get(current_room, True),
+                        "losEnabled": room_los_enabled.get(current_room, True)
+                    }
+                })
+                await ws_obj.send(fow_message)
                 
                 # Broadcast della lista giocatori aggiornata
                 players = [{"username": info["username"], "is_master": info["is_master"]} if isinstance(info, dict) else {"username": info, "is_master": False} for info in connected_rooms[current_room].values()]
@@ -554,6 +575,72 @@ async def ws_endpoint():
                         }
                     })
                     await _broadcast(current_room, broadcast_message)
+
+            # 9. UPDATE WALLS (MASTER ONLY)
+            elif msg_type == "UPDATE_WALLS" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    new_walls = payload.get("walls", [])
+                    if isinstance(new_walls, list) and len(new_walls) <= 300:
+                        sanitized_walls = []
+                        for w in new_walls:
+                            if not isinstance(w, dict):
+                                continue
+                            try:
+                                sanitized_w = {
+                                    "id": str(w.get("id", ""))[:50],
+                                    "startX": float(w.get("startX", 0)),
+                                    "startY": float(w.get("startY", 0)),
+                                    "endX": float(w.get("endX", 0)),
+                                    "endY": float(w.get("endY", 0))
+                                }
+                                sanitized_walls.append(sanitized_w)
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        room_walls[current_room] = sanitized_walls
+                        broadcast_message = json.dumps({
+                            "type": "UPDATE_WALLS",
+                            "payload": {"walls": sanitized_walls}
+                        })
+                        await _broadcast(current_room, broadcast_message)
+                    else:
+                        await ws_obj.send(json.dumps({
+                            "type": "ERROR",
+                            "payload": {"message": "Dati dei muri non validi o limite superato"}
+                        }))
+                else:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Solo il Master può aggiornare i muri della campagna"}
+                    }))
+
+            # 10. UPDATE FOW SETTINGS (MASTER ONLY)
+            elif msg_type == "UPDATE_FOW_SETTINGS" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    enabled = payload.get("enabled", True)
+                    los_enabled = payload.get("losEnabled", True)
+                    room_fow_enabled[current_room] = enabled
+                    room_los_enabled[current_room] = los_enabled
+                    
+                    broadcast_message = json.dumps({
+                        "type": "UPDATE_FOW_SETTINGS",
+                        "payload": {
+                            "enabled": enabled,
+                            "losEnabled": los_enabled
+                        }
+                    })
+                    await _broadcast(current_room, broadcast_message)
+                else:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Solo il Master può modificare le impostazioni della nebbia di guerra"}
+                    }))
   
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
