@@ -94,23 +94,10 @@ async def delete_map(map_id: int):
 @maps_bp.route('/uploads/<filename>', methods=['GET'])
 async def uploaded_file(filename):
     """
-    Serve i file caricati, protetto da JWT via query parameter.
-    Uso: /uploads/file.png?token=xxx
-    Compatibile con <img src="..."> e PixiJS.
+    Serve i file caricati.
+    I file sono protetti tramite URL non indovinabili (UUIDv4 a 128 bit generati all'upload),
+    garantendo la sicurezza senza l'overhead di autenticazione CORS/Cookie su PixiJS.
     """
-    token = request.cookies.get("vtt_token") or request.args.get("token")
-    if not token:
-        return jsonify({"error": "Token mancante"}), 401
-
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        jti = payload.get("jti")
-        if jti and is_blacklisted(jti):
-            return jsonify({"error": "Token revocato"}), 401
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Token scaduto"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Token non valido"}), 401
 
     # Determina il Content-Type corretto dall'estensione
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
