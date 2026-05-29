@@ -6,7 +6,7 @@ API REST + WebSocket server per gestire sessioni di gioco, mappe e token in temp
 
 - **Runtime**: Python 3.11+
 - **Framework**: Flask / Flask-SocketIO
-- **Database**: PostgreSQL 16 (Alpine) - *Niente più SQLite*
+- **Database**: PostgreSQL 16 (Alpine)
 - **Containerization**: Docker & Docker Compose
 - **Auth**: JWT (Stateless) con validazione su WebSocket handshake e per-message.
 
@@ -108,7 +108,7 @@ Vtt_backend/
 
 - Database: I dati persistono nel volume Docker postgres_data.
 - Env Variables: Mai committare il file .env. È in .gitignore.
-- Migrazione: Da SQLite a Postgres completata. Usare psycopg2-binary
+- Database driver: Usare asyncpg per Tortoise ORM con PostgreSQL
 
 ---
 
