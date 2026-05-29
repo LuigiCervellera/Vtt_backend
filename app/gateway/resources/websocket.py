@@ -87,7 +87,12 @@ async def ws_endpoint():
         auth_data = json.loads(raw_auth_data)
         if auth_data.get("type") != "AUTH":
             raise ValueError("Il primo messaggio deve essere di tipo AUTH")
-        token = auth_data.get("payload", {}).get("token")
+        
+        token = websocket.cookies.get("vtt_token")
+        if not token:
+            # Fallback per compatibilità/testing
+            token = auth_data.get("payload", {}).get("token")
+            
         if not token:
             raise ValueError("Token mancante")
     except asyncio.TimeoutError:

@@ -98,7 +98,7 @@ async def uploaded_file(filename):
     Uso: /uploads/file.png?token=xxx
     Compatibile con <img src="..."> e PixiJS.
     """
-    token = request.args.get("token")
+    token = request.cookies.get("vtt_token") or request.args.get("token")
     if not token:
         return jsonify({"error": "Token mancante"}), 401
 

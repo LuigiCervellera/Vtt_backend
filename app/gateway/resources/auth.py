@@ -1,5 +1,5 @@
 import re
-from quart import Blueprint, jsonify, request, g
+from quart import Blueprint, jsonify, request, g, make_response
 from quart_schema import validate_request, tag
 import jwt
 import uuid
@@ -11,6 +11,7 @@ from app.app_modules.auth.blacklist import blacklist_token
 from app.app_modules.base.config import (
     JWT_EXP_DELTA_SECONDS, JWT_SECRET, JWT_ALGORITHM,
     PASSWORD_MIN_LENGTH, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH,
+    COOKIE_SECURE, COOKIE_SAMESITE,
 )
 
 # Regex: solo lettere, numeri e underscore
@@ -70,11 +71,19 @@ async def login(data: AuthRequest):
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
         
-        return jsonify({
+        resp_obj = await make_response(jsonify({
             "message": "Login effettuato", 
-            "token": token,
             "user": {"id": user.id, "username": user.username}
-        }), 200
+        }))
+        resp_obj.set_cookie(
+            "vtt_token",
+            token,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+            max_age=JWT_EXP_DELTA_SECONDS
+        )
+        return resp_obj, 200
     
     return jsonify({"error": "Credenziali non valide"}), 401
 
@@ -96,7 +105,9 @@ async def logout():
     jti = g.user.get("jti")
     if jti:
         blacklist_token(jti)
-    return jsonify({"message": "Logout effettuato con successo"}), 200
+    resp_obj = await make_response(jsonify({"message": "Logout effettuato con successo"}))
+    resp_obj.delete_cookie("vtt_token")
+    return resp_obj, 200
 
 @auth_bp.route("/update_username", methods=["PUT"])
 @tag(["auth"])

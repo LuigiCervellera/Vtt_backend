@@ -8,11 +8,15 @@ from app.app_modules.auth.blacklist import is_blacklisted
 def jwt_required(f):
     @wraps(f)
     async def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
+        token = request.cookies.get("vtt_token")
+        if not token:
+            # Fallback per strumenti di test ed API client tradizionali
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                
+        if not token:
             return jsonify({"error": "Token mancante o non valido"}), 401
-        
-        token = auth_header.split(" ")[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
 

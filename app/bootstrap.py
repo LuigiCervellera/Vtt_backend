@@ -20,7 +20,8 @@ def create_app() -> Quart:
         app,
         allow_origin=ALLOWED_ORIGINS,
         allow_headers=["Content-Type", "Authorization"],
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_credentials=True
     )
     
     # Configure Swagger/OpenAPI Schema
