@@ -581,6 +581,19 @@ async def ws_endpoint():
                     })
                     await _broadcast(current_room, broadcast_message)
 
+            # 8.5 PING (BROADCAST)
+            elif msg_type == "PING" and current_room:
+                broadcast_message = json.dumps({
+                    "type": "PING",
+                    "payload": {
+                        "x": payload.get("x"),
+                        "y": payload.get("y"),
+                        "username": authenticated_username,
+                        "color": payload.get("color", 0xa855f7)
+                    }
+                })
+                await _broadcast(current_room, broadcast_message)
+
             # 9. UPDATE WALLS (MASTER ONLY)
             elif msg_type == "UPDATE_WALLS" and current_room:
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
