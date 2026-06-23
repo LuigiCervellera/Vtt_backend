@@ -13,10 +13,10 @@ campaigns_bp = Blueprint("campaigns", __name__, url_prefix="/api/campaigns")
 @jwt_required
 async def get_campaigns():
     user_id = g.user["id"]
-    mastered = await Campaign.filter(master_id=user_id).values("id", "nome_campagna", "codice_invito", "master_id")
+    mastered = await Campaign.filter(master_id=user_id).values("id", "nome_campagna", "codice_invito", "master_id", "system_id")
     
     user = await User.get(id=user_id).prefetch_related('campaigns_joined')
-    joined = [{"id": c.id, "nome_campagna": c.nome_campagna, "codice_invito": c.codice_invito, "master_id": c.master_id} for c in user.campaigns_joined]
+    joined = [{"id": c.id, "nome_campagna": c.nome_campagna, "codice_invito": c.codice_invito, "master_id": c.master_id, "system_id": c.system_id} for c in user.campaigns_joined]
     
     all_campaigns = list({c["id"]: c for c in mastered + joined}.values())
     return jsonify(all_campaigns), 200
@@ -29,15 +29,17 @@ async def create_campaign(data: CampaignCreate):
     master = await User.get_or_none(id=g.user["id"])
     if not master:
         return jsonify({"error": "Master non trovato"}), 404
+    print(f"DEBUG: create_campaign received system_id: {data.system_id}", flush=True)
     try:
         # Genera codice invito sicuro lato server (8 caratteri hex)
         codice_invito = uuid.uuid4().hex[:8]
         campaign = await Campaign.create(
             nome_campagna=data.nome_campagna,
             codice_invito=codice_invito,
+            system_id=data.system_id,
             master=master
         )
-        return jsonify({"message": "Campagna creata", "id": campaign.id, "codice_invito": codice_invito}), 201
+        return jsonify({"message": "Campagna creata", "id": campaign.id, "codice_invito": codice_invito, "system_id": campaign.system_id}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 

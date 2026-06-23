@@ -42,6 +42,8 @@ class Campaign(Model):
     maps: fields.ReverseRelation["Map"]
     characters: fields.ReverseRelation["Character"]
 
+    system_id = fields.CharField(max_length=50, default="generic")
+
     class Meta:  # type: ignore
         table = "campaigns"
 

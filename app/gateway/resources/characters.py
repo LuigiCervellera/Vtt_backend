@@ -66,3 +66,30 @@ async def delete_character(character_id: int):
         return jsonify({"error": "Non hai i permessi per eliminare questo personaggio"}), 403
     await character.delete()
     return jsonify({"message": "Personaggio eliminato"}), 200
+
+@characters_bp.route("/<int:character_id>", methods=["PUT"])
+@tag(["characters"])
+@jwt_required
+async def update_character(character_id: int):
+    user_id = g.user["id"]
+    character = await Character.get_or_none(id=character_id).prefetch_related("campagna")
+    if not character:
+        return jsonify({"error": "Personaggio non trovato"}), 404
+    is_master = character.campagna.master_id == user_id
+    is_owner = character.proprietario_id == user_id
+    if not is_master and not is_owner:
+        return jsonify({"error": "Non hai i permessi per modificare questo personaggio"}), 403
+    
+    from quart import request
+    req_data = await request.get_json()
+    if "nome" in req_data:
+        character.nome = req_data["nome"]
+    if "is_npc" in req_data:
+        character.is_npc = req_data["is_npc"]
+    if "url_avatar" in req_data:
+        character.url_avatar = req_data["url_avatar"]
+    if "scheda_dati" in req_data:
+        character.scheda_dati = req_data["scheda_dati"]
+        
+    await character.save()
+    return jsonify({"message": "Personaggio aggiornato", "id": character.id}), 200
