@@ -336,7 +336,13 @@ async def ws_endpoint():
                         }
                     room_tokens[current_room][token_id]["x"] = payload.get("x", 0)
                     room_tokens[current_room][token_id]["y"] = payload.get("y", 0)
- 
+                    if "auraRadius" in payload:
+                        room_tokens[current_room][token_id]["auraRadius"] = payload.get("auraRadius")
+                    if "auraColor" in payload:
+                        room_tokens[current_room][token_id]["auraColor"] = payload.get("auraColor")
+                    if "visionRadius" in payload:
+                        room_tokens[current_room][token_id]["visionRadius"] = payload.get("visionRadius")
+
                     # Arricchiamo il payload broadcasted con colore e owner_id per garantire consistenza.
                     # Forza SEMPRE l'owner_id dello stato del server per prevenire spoofing / furti di token.
                     token_data = room_tokens[current_room][token_id]
