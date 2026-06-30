@@ -6,3 +6,4 @@ uploads/*
 .env
 venv/
 __pycache__/
+.agents/skills.json
