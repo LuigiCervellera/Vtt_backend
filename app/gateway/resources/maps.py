@@ -12,6 +12,7 @@ from app.app_modules.base.config import (
     JWT_SECRET, JWT_ALGORITHM,
 )
 from app.app_modules.auth.blacklist import is_blacklisted
+from app.app_modules.base.utils import is_safe_url
 
 # Magic bytes per validazione contenuto file
 _IMAGE_SIGNATURES = {
@@ -70,6 +71,8 @@ async def create_map(data: MapCreate):
         return jsonify({"error": "Campagna non trovata"}), 404
     if campaign.master_id != user_id:
         return jsonify({"error": "Solo il master può creare mappe"}), 403
+    if data.url_immagine and not is_safe_url(data.url_immagine):
+        return jsonify({"error": "URL immagine non valido o non sicuro"}), 400
     m = await Map.create(
         campagna=campaign,
         nome_mappa=data.nome_mappa,
@@ -113,6 +116,11 @@ async def uploaded_file(filename):
 @maps_bp.route('/api/upload-map', methods=['POST'])
 @jwt_required
 async def upload_map():
+    # Verifica Content-Length prima di leggere la richiesta
+    content_length = request.content_length
+    if content_length is not None and content_length > MAX_UPLOAD_SIZE:
+        return jsonify({"error": "File troppo grande. Max 5MB"}), 413
+
     files = await request.files
     if 'mapImage' not in files:
         return jsonify({"error": "Nessuna immagine caricata"}), 400
@@ -127,8 +135,8 @@ async def upload_map():
         return jsonify({"error": f"Tipo file non permesso. Ammessi: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
         
     if file:
-        # Leggi il contenuto per verificare la dimensione
-        file_data = file.read()
+        # Leggi solo fino al limite massimo consentito + 1 per prevenire l'esaurimento della memoria
+        file_data = file.read(MAX_UPLOAD_SIZE + 1)
         if len(file_data) > MAX_UPLOAD_SIZE:
             return jsonify({"error": "File troppo grande. Max 5MB"}), 413
 

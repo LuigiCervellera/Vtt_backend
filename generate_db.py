@@ -7,8 +7,10 @@ load_dotenv()
 
 
 async def init_db():
-    db_url = os.getenv("DATABASE_URL", "postgres://postgres:admin@localhost:5432/vtt_db")
-    print(f"Connecting to {db_url}...")
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL environment variable is not set!")
+    print("Connecting to database...")
     try:
         await Tortoise.init(
             db_url=db_url,

@@ -1,10 +1,13 @@
 import uuid
+import logging
 
 from quart import Blueprint, jsonify, g
 from quart_schema import validate_request, tag
 from models import Campaign, User
 from app.app_modules.auth.decorators import jwt_required
 from app.app_modules.campaigns.schemas import CampaignCreate, CampaignJoin
+
+logger = logging.getLogger(__name__)
 
 campaigns_bp = Blueprint("campaigns", __name__, url_prefix="/api/campaigns")
 
@@ -29,7 +32,7 @@ async def create_campaign(data: CampaignCreate):
     master = await User.get_or_none(id=g.user["id"])
     if not master:
         return jsonify({"error": "Master non trovato"}), 404
-    print(f"DEBUG: create_campaign received system_id: {data.system_id}", flush=True)
+    logger.debug(f"create_campaign received system_id: {data.system_id}")
     try:
         # Genera codice invito sicuro lato server (8 caratteri hex)
         codice_invito = uuid.uuid4().hex[:8]
@@ -41,7 +44,8 @@ async def create_campaign(data: CampaignCreate):
         )
         return jsonify({"message": "Campagna creata", "id": campaign.id, "codice_invito": codice_invito, "system_id": campaign.system_id}), 201
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        logger.error(f"Errore durante la creazione della campagna: {e}", exc_info=True)
+        return jsonify({"error": "Impossibile creare la campagna"}), 400
 
 @campaigns_bp.route("/join", methods=["POST"])
 @tag(["campaigns"])

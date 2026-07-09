@@ -1,19 +1,18 @@
 """
 Blacklist per JWT revocati (logout).
 
-Implementazione in-memory con set di JTI (JWT ID).
-In futuro, migrare a Redis per supporto multi-istanza.
+Implementazione persistente nel database PostgreSQL tramite Tortoise ORM.
 """
+import datetime
 
-# Set di JTI (JWT ID) dei token revocati
-_blacklisted_jtis: set[str] = set()
+async def blacklist_token(jti: str, expires_in: int = 86400) -> None:
+    """Aggiunge un JTI alla blacklist (token revocato) nel DB."""
+    from models import BlacklistedToken
+    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=expires_in)
+    await BlacklistedToken.create(jti=jti, expires_at=expires_at)
 
 
-def blacklist_token(jti: str) -> None:
-    """Aggiunge un JTI alla blacklist (token revocato)."""
-    _blacklisted_jtis.add(jti)
-
-
-def is_blacklisted(jti: str) -> bool:
+async def is_blacklisted(jti: str) -> bool:
     """Verifica se un JTI è nella blacklist."""
-    return jti in _blacklisted_jtis
+    from models import BlacklistedToken
+    return await BlacklistedToken.filter(jti=jti).exists()

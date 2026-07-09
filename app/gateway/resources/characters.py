@@ -2,7 +2,8 @@ from quart import Blueprint, jsonify, g
 from quart_schema import validate_request, tag
 from models import Character, Campaign, User
 from app.app_modules.auth.decorators import jwt_required
-from app.app_modules.characters.schemas import CharacterCreate
+from app.app_modules.characters.schemas import CharacterCreate, CharacterUpdate
+from app.app_modules.base.utils import is_safe_url
 
 characters_bp = Blueprint("characters", __name__, url_prefix="/api/characters")
 
@@ -29,8 +30,9 @@ async def create_character(data: CharacterCreate):
         return jsonify({"error": "Campagna non trovata"}), 404
 
     # Verifica che l'utente sia membro della campagna (master o partecipante)
+    is_master = campaign.master_id == user_id
     is_member = False
-    if campaign.master_id == user_id:
+    if is_master:
         is_member = True
     else:
         is_member = await campaign.partecipanti.filter(id=user_id).exists()
@@ -38,51 +40,82 @@ async def create_character(data: CharacterCreate):
     if not is_member:
         return jsonify({"error": "Non sei membro di questa campagna"}), 403
 
+    if data.url_avatar and not is_safe_url(data.url_avatar):
+        return jsonify({"error": "URL avatar non valido o non sicuro"}), 400
+
     proprietario = None
-    if data.proprietario_id:
-        proprietario = await User.get_or_none(id=data.proprietario_id)
-        
+    if is_master:
+        if data.proprietario_id:
+            # Verifica che il proprietario sia membro della campagna o il master stesso
+            is_owner_member = (data.proprietario_id == campaign.master_id) or \
+                              await campaign.partecipanti.filter(id=data.proprietario_id).exists()
+            if not is_owner_member:
+                return jsonify({"error": "Il proprietario specificato non è membro di questa campagna"}), 400
+            proprietario = await User.get_or_none(id=data.proprietario_id)
+        is_npc = data.is_npc
+    else:
+        # I giocatori normali possono creare solo personaggi legati a se stessi e non NPC
+        proprietario = await User.get_or_none(id=user_id)
+        is_npc = False
+
     c = await Character.create(
         campagna=campaign,
         nome=data.nome,
-        is_npc=data.is_npc,
+        is_npc=is_npc,
         proprietario=proprietario,
         url_avatar=data.url_avatar,
         scheda_dati=data.scheda_dati or {}
     )
     return jsonify({"message": "Personaggio creato", "id": c.id}), 201
 
-@characters_bp.route("/<int:character_id>", methods=["PUT", "DELETE"])
+@characters_bp.route("/<int:character_id>", methods=["PUT"])
 @tag(["characters"])
 @jwt_required
-async def manage_character(character_id: int):
-    from quart import request
+@validate_request(CharacterUpdate)
+async def update_character(character_id: int, data: CharacterUpdate):
     user_id = g.user["id"]
     character = await Character.get_or_none(id=character_id).prefetch_related("campagna")
     if not character:
         return jsonify({"error": "Personaggio non trovato"}), 404
+        
     is_master = character.campagna.master_id == user_id
     is_owner = character.proprietario_id == user_id
 
-    if request.method == "DELETE":
-        if not is_master and not is_owner:
-            return jsonify({"error": "Non hai i permessi per eliminare questo personaggio"}), 403
-        await character.delete()
-        return jsonify({"message": "Personaggio eliminato"}), 200
+    if not is_master and not is_owner:
+        return jsonify({"error": "Non hai i permessi per modificare questo personaggio"}), 403
 
-    elif request.method == "PUT":
-        if not is_master and not is_owner:
-            return jsonify({"error": "Non hai i permessi per modificare questo personaggio"}), 403
+    if data.url_avatar and not is_safe_url(data.url_avatar):
+        return jsonify({"error": "URL avatar non valido o non sicuro"}), 400
+
+    if data.nome is not None:
+        character.nome = data.nome
+    if data.is_npc is not None:
+        if not is_master:
+            return jsonify({"error": "Solo il master può cambiare lo stato NPC"}), 403
+        character.is_npc = data.is_npc
+    if data.url_avatar is not None:
+        character.url_avatar = data.url_avatar
+    if data.scheda_dati is not None:
+        character.scheda_dati = data.scheda_dati
+
+    await character.save()
+    return jsonify({"message": "Personaggio aggiornato", "id": character.id}), 200
+
+
+@characters_bp.route("/<int:character_id>", methods=["DELETE"])
+@tag(["characters"])
+@jwt_required
+async def delete_character(character_id: int):
+    user_id = g.user["id"]
+    character = await Character.get_or_none(id=character_id).prefetch_related("campagna")
+    if not character:
+        return jsonify({"error": "Personaggio non trovato"}), 404
         
-        req_data = await request.get_json()
-        if "nome" in req_data:
-            character.nome = req_data["nome"]
-        if "is_npc" in req_data:
-            character.is_npc = req_data["is_npc"]
-        if "url_avatar" in req_data:
-            character.url_avatar = req_data["url_avatar"]
-        if "scheda_dati" in req_data:
-            character.scheda_dati = req_data["scheda_dati"]
-            
-        await character.save()
-        return jsonify({"message": "Personaggio aggiornato", "id": character.id}), 200
+    is_master = character.campagna.master_id == user_id
+    is_owner = character.proprietario_id == user_id
+
+    if not is_master and not is_owner:
+        return jsonify({"error": "Non hai i permessi per eliminare questo personaggio"}), 403
+
+    await character.delete()
+    return jsonify({"message": "Personaggio eliminato"}), 200

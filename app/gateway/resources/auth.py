@@ -5,7 +5,7 @@ import jwt
 import uuid
 import datetime
 from models import User
-from app.app_modules.auth.decorators import jwt_required
+from app.app_modules.auth.decorators import jwt_required, rate_limit
 from app.app_modules.auth.schemas import AuthRequest, UpdateUsernameRequest, UpdatePasswordRequest
 from app.app_modules.auth.blacklist import blacklist_token
 from app.app_modules.base.config import (
@@ -21,6 +21,7 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
 @auth_bp.route("/register", methods=["POST"])
 @tag(["auth"])
+@rate_limit(limit=5, period=60)
 @validate_request(AuthRequest)
 async def register(data: AuthRequest):
     """Registrazione nuovo utente"""
@@ -52,6 +53,7 @@ async def register(data: AuthRequest):
 
 @auth_bp.route("/login", methods=["POST"])
 @tag(["auth"])
+@rate_limit(limit=10, period=60)
 @validate_request(AuthRequest)
 async def login(data: AuthRequest):
     """Login utente"""
@@ -104,7 +106,7 @@ async def logout():
     """Logout utente (revoca token tramite blacklist JTI)"""
     jti = g.user.get("jti")
     if jti:
-        blacklist_token(jti)
+        await blacklist_token(jti)
     resp_obj = await make_response(jsonify({"message": "Logout effettuato con successo"}))
     resp_obj.delete_cookie("vtt_token")
     return resp_obj, 200
@@ -135,7 +137,29 @@ async def update_username(data: UpdateUsernameRequest):
         
     user.username = new_username
     await user.save()
-    return jsonify({"message": "Username aggiornato con successo", "user": {"id": user.id, "username": user.username}}), 200
+
+    # Genera un nuovo token JWT per aggiornare l'identità dell'utente (username)
+    payload = {
+        "id": user.id,
+        "username": user.username,
+        "jti": str(uuid.uuid4()),
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=JWT_EXP_DELTA_SECONDS)
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    resp_obj = await make_response(jsonify({
+        "message": "Username aggiornato con successo",
+        "user": {"id": user.id, "username": user.username}
+    }))
+    resp_obj.set_cookie(
+        "vtt_token",
+        token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=JWT_EXP_DELTA_SECONDS
+    )
+    return resp_obj, 200
 
 @auth_bp.route("/update_password", methods=["PUT"])
 @tag(["auth"])

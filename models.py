@@ -86,3 +86,16 @@ class Character(Model):
 
     def __str__(self):
         return self.nome
+
+
+class BlacklistedToken(Model):
+    id = fields.IntField(pk=True)
+    jti = fields.CharField(max_length=255, unique=True, index=True)
+    blacklisted_at = fields.DatetimeField(auto_now_add=True)
+    expires_at = fields.DatetimeField()
+
+    class Meta:  # type: ignore
+        table = "blacklisted_tokens"
+
+    def __str__(self):
+        return self.jti

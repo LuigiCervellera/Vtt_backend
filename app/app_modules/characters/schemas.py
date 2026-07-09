@@ -9,3 +9,10 @@ class CharacterCreate:
     proprietario_id: Optional[int] = None
     url_avatar: Optional[str] = None
     scheda_dati: Optional[dict] = None
+
+@dataclass
+class CharacterUpdate:
+    nome: Optional[str] = None
+    is_npc: Optional[bool] = None
+    url_avatar: Optional[str] = None
+    scheda_dati: Optional[dict] = None

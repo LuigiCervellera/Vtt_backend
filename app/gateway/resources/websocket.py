@@ -118,7 +118,7 @@ async def ws_endpoint():
 
     # Verifica blacklist del token
     jti = jwt_payload.get("jti")
-    if jti and is_blacklisted(jti):
+    if jti and await is_blacklisted(jti):
         await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Token revocato"}}))
         await websocket.close(4003)
         return
