@@ -34,6 +34,7 @@ def create_app() -> Quart:
         
     # Register blueprints
     app.register_blueprint(auth_bp)
+
     app.register_blueprint(campaigns_bp)
     app.register_blueprint(maps_bp)
     app.register_blueprint(characters_bp)

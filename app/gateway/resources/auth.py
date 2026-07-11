@@ -177,5 +177,28 @@ async def update_password(data: UpdatePasswordRequest):
 
     user.set_password(data.new_password)
     await user.save()
-    return jsonify({"message": "Password aggiornata con successo"}), 200
+
+    # Revoca il vecchio token e genera un nuovo JWT (regola #11: JWT revocation on auth field change)
+    old_jti = g.user.get("jti")
+    if old_jti:
+        await blacklist_token(old_jti)
+
+    payload = {
+        "id": user.id,
+        "username": user.username,
+        "jti": str(uuid.uuid4()),
+        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=JWT_EXP_DELTA_SECONDS)
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    resp_obj = await make_response(jsonify({"message": "Password aggiornata con successo"}))
+    resp_obj.set_cookie(
+        "vtt_token",
+        token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=JWT_EXP_DELTA_SECONDS
+    )
+    return resp_obj, 200
 

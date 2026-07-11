@@ -100,7 +100,8 @@ async def ws_endpoint():
         await websocket.close(4003)
         return
     except Exception as e:
-        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": f"Autenticazione fallita: {str(e)}"}}))
+        logger.error("WebSocket authentication error: %s", e, exc_info=True)
+        await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Autenticazione fallita"}}))
         await websocket.close(4003)
         return
         
