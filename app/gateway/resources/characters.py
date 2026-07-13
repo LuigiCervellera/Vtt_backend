@@ -3,6 +3,7 @@ from quart_schema import validate_request, tag
 from models import Character, Campaign, User
 from app.app_modules.auth.decorators import jwt_required
 from app.app_modules.characters.schemas import CharacterCreate, CharacterUpdate
+from app.app_modules.characters.validation import sanitize_scheda_dati, SchedaValidationError
 from app.app_modules.base.utils import is_safe_url
 
 characters_bp = Blueprint("characters", __name__, url_prefix="/api/characters")
