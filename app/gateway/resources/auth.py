@@ -10,7 +10,7 @@ from app.app_modules.auth.schemas import AuthRequest, UpdateUsernameRequest, Upd
 from app.app_modules.auth.blacklist import blacklist_token
 from app.app_modules.base.config import (
     JWT_EXP_DELTA_SECONDS, JWT_SECRET, JWT_ALGORITHM,
-    PASSWORD_MIN_LENGTH, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH,
+    PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH,
     COOKIE_SECURE, COOKIE_SAMESITE,
 )
 
@@ -38,8 +38,8 @@ async def register(data: AuthRequest):
         return jsonify({"error": "L'username può contenere solo lettere, numeri e underscore"}), 400
 
     # Validazione password
-    if len(password) < PASSWORD_MIN_LENGTH:
-        return jsonify({"error": f"La password deve essere di almeno {PASSWORD_MIN_LENGTH} caratteri"}), 400
+    if len(password) < PASSWORD_MIN_LENGTH or len(password) > PASSWORD_MAX_LENGTH:
+        return jsonify({"error": f"La password deve essere tra {PASSWORD_MIN_LENGTH} e {PASSWORD_MAX_LENGTH} caratteri"}), 400
 
     existing_user = await User.get_or_none(username=username)
     if existing_user:
@@ -62,6 +62,10 @@ async def login(data: AuthRequest):
 
     if not username or not password:
         return jsonify({"error": "Username e password richiesti"}), 400
+
+    # Limit password length early to prevent CPU exhaustion on invalid/large inputs
+    if len(password) > PASSWORD_MAX_LENGTH:
+        return jsonify({"error": "Credenziali non valide"}), 401
 
     user = await User.get_or_none(username=username)
     if user and user.check_password(password):
@@ -138,6 +142,11 @@ async def update_username(data: UpdateUsernameRequest):
     user.username = new_username
     await user.save()
 
+    # Revoca il vecchio token (regola #11: JWT revocation on auth field change)
+    old_jti = g.user.get("jti")
+    if old_jti:
+        await blacklist_token(old_jti)
+
     # Genera un nuovo token JWT per aggiornare l'identità dell'utente (username)
     payload = {
         "id": user.id,
@@ -172,8 +181,8 @@ async def update_password(data: UpdatePasswordRequest):
     if not user or not user.check_password(data.current_password):
         return jsonify({"error": "Credenziali attuali non valide"}), 401
 
-    if len(data.new_password) < PASSWORD_MIN_LENGTH:
-        return jsonify({"error": f"La nuova password deve essere di almeno {PASSWORD_MIN_LENGTH} caratteri"}), 400
+    if len(data.new_password) < PASSWORD_MIN_LENGTH or len(data.new_password) > PASSWORD_MAX_LENGTH:
+        return jsonify({"error": f"La nuova password deve essere tra {PASSWORD_MIN_LENGTH} e {PASSWORD_MAX_LENGTH} caratteri"}), 400
 
     user.set_password(data.new_password)
     await user.save()

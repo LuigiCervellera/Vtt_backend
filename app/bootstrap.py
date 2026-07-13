@@ -12,6 +12,10 @@ from app.gateway.resources.maps import maps_bp
 from app.gateway.resources.characters import characters_bp
 from app.gateway.resources.websocket import ws_bp
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def create_app() -> Quart:
     app = Quart(__name__)
     
@@ -46,6 +50,15 @@ def create_app() -> Quart:
 
         # Init Tortoise ORM connection
         await init_tortoise()
+        
+        # Pulizia automatica dei token revocati già scaduti (L3)
+        try:
+            from app.app_modules.auth.blacklist import clean_expired_blacklisted_tokens
+            deleted = await clean_expired_blacklisted_tokens()
+            if deleted > 0:
+                logger.info(f"Puliti {deleted} token revocati e scaduti dal database.")
+        except Exception as e:
+            logger.error(f"Errore durante la pulizia dei token scaduti: {e}", exc_info=True)
         
     @app.after_serving
     async def shutdown():

@@ -50,11 +50,16 @@ JWT_EXP_DELTA_SECONDS = 86400  # 24 hours
 
 # Password & Username validation
 PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 128
 USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 50
 
 # Cookie configuration for JWT storage
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "False").lower() in ("true", "1", "yes")
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "Lax")
+
+# Proxy trust configuration for rate limiting
+TRUST_PROXY = os.getenv("TRUST_PROXY", "False").lower() in ("true", "1", "yes")
+
 
 

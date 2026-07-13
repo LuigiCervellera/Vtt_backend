@@ -88,13 +88,15 @@ async def ws_endpoint():
         if auth_data.get("type") != "AUTH":
             raise ValueError("Il primo messaggio deve essere di tipo AUTH")
         
+        # Sicurezza: l'autenticazione principale è basata su Cookie HttpOnly ("vtt_token")
+        # trasmessi automaticamente durante l'handshake di upgrade HTTP del WebSocket.
         token = websocket.cookies.get("vtt_token")
         if not token:
-            # Fallback per compatibilità/testing
+            # Fallback solo per compatibilità all'interno di test automatizzati o client REST senza cookie
             token = auth_data.get("payload", {}).get("token")
             
         if not token:
-            raise ValueError("Token mancante")
+            raise ValueError("Token di sessione mancante sia nei cookie che nel payload")
     except asyncio.TimeoutError:
         await websocket.send(json.dumps({"type": "ERROR", "payload": {"message": "Timeout di autenticazione"}}))
         await websocket.close(4003)
@@ -407,58 +409,157 @@ async def ws_endpoint():
                 if current_room not in room_chat_history:
                     room_chat_history[current_room] = []
 
-                # Forza l'identità dal JWT — ignora username/userId dal client
-                payload["username"] = authenticated_username
-                payload["userId"] = authenticated_user_id
+                if isinstance(payload, dict):
+                    # Validazione e whitelisting (M1)
+                    text_val = payload.get("text")
+                    if text_val is None:
+                        text_val = ""
+                    else:
+                        text_val = str(text_val)[:2000] # Limite a 2000 caratteri
 
-                room_chat_history[current_room].append(payload)
-                if len(room_chat_history[current_room]) > 100:
-                    room_chat_history[current_room] = room_chat_history[current_room][-100:]
-                    
-                broadcast_message = json.dumps({
-                    "type": "CHAT_MESSAGE",
-                    "payload": payload
-                })
-                
-                # Invia a tutti, compreso il mittente, così si assicura che sia stato ricevuto
-                await _broadcast(current_room, broadcast_message)
+                    sanitized_chat = {
+                        "id": payload.get("id", int(asyncio.get_event_loop().time() * 1000)),
+                        "roomId": str(payload.get("roomId", ""))[:50],
+                        "sender": authenticated_username,
+                        "userId": authenticated_user_id,
+                        "text": text_val,
+                        "isSystem": bool(payload.get("isSystem", False)),
+                        "isRoll": bool(payload.get("isRoll", False)),
+                        "isCard": bool(payload.get("isCard", False)),
+                    }
+
+                    if "cardTitle" in payload:
+                        sanitized_chat["cardTitle"] = str(payload.get("cardTitle", ""))[:100]
+
+                    if sanitized_chat["isRoll"] and isinstance(payload.get("rollDetails"), dict):
+                        rd = payload["rollDetails"]
+                        results = rd.get("results", [])
+                        if isinstance(results, list):
+                            results = [int(r) for r in results[:100] if isinstance(r, (int, float))]
+                        else:
+                            results = []
+
+                        sanitized_chat["rollDetails"] = {
+                            "formula": str(rd.get("formula", ""))[:50],
+                            "results": results,
+                            "modifier": int(rd.get("modifier", 0)),
+                            "total": int(rd.get("total", 0)),
+                            "faces": int(rd.get("faces", 20))
+                        }
+
+                        sources = rd.get("sources", [])
+                        if isinstance(sources, list):
+                            sanitized_sources = []
+                            for s in sources[:10]: # Max 10 sub-sources
+                                if isinstance(s, dict):
+                                    s_results = s.get("results", [])
+                                    if isinstance(s_results, list):
+                                        s_results = [int(r) for r in s_results[:100] if isinstance(r, (int, float))]
+                                    else:
+                                        s_results = []
+                                    sanitized_sources.append({
+                                        "formula": str(s.get("formula", ""))[:50],
+                                        "results": s_results,
+                                        "modifier": int(s.get("modifier", 0)),
+                                        "total": int(s.get("total", 0)),
+                                        "type": str(s.get("type", "base"))[:20]
+                                    })
+                            sanitized_chat["rollDetails"]["sources"] = sanitized_sources
+
+                    room_chat_history[current_room].append(sanitized_chat)
+                    if len(room_chat_history[current_room]) > 100:
+                        room_chat_history[current_room] = room_chat_history[current_room][-100:]
+                        
+                    broadcast_message = json.dumps({
+                        "type": "CHAT_MESSAGE",
+                        "payload": sanitized_chat
+                    })
+                    await _broadcast(current_room, broadcast_message)
                     
             # 4. GRID SETTINGS (BROADCAST)
             elif msg_type == "GRID_SETTINGS" and current_room:
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
                 is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
                 
-                if is_master:
-                    room_grid_settings[current_room] = payload
+                if is_master and isinstance(payload, dict):
+                    # Whitelist e sanitizzazione (M4)
+                    sanitized_grid = {
+                        "snapToGrid": bool(payload.get("snapToGrid", True)),
+                        "gridVisible": bool(payload.get("gridVisible", True)),
+                        "gridColumns": int(payload.get("gridColumns", 20)),
+                        "gridSize": int(payload.get("gridSize", 70)),
+                        "measurementUnit": str(payload.get("measurementUnit", "feet"))[:10],
+                        "diagonalMeasurement": str(payload.get("diagonalMeasurement", "dnd5e"))[:20]
+                    }
+                    
+                    room_grid_settings[current_room] = sanitized_grid
                     broadcast_message = json.dumps({
                         "type": "GRID_SETTINGS",
-                        "payload": payload
+                        "payload": sanitized_grid
                     })
                     await _broadcast(current_room, broadcast_message)
             
             # 4.5 UPDATE RULER (BROADCAST)
             elif msg_type == "UPDATE_RULER" and current_room:
-                payload["username"] = authenticated_username
-                payload["userId"] = authenticated_user_id
-                
-                logger.debug(f"[RULER] {authenticated_username} in room {current_room}: visible={payload.get('visible')}")
-                
-                broadcast_message = json.dumps({
-                    "type": "UPDATE_RULER",
-                    "payload": payload
-                })
-                await _broadcast(current_room, broadcast_message, exclude=ws_obj)
+                if isinstance(payload, dict):
+                    # Whitelist e sanitizzazione (M4)
+                    waypoints = payload.get("waypoints", [])
+                    if isinstance(waypoints, list):
+                        sanitized_waypoints = []
+                        for pt in waypoints[:100]:
+                            if isinstance(pt, list) and len(pt) >= 2:
+                                try:
+                                    sanitized_waypoints.append([float(pt[0]), float(pt[1])])
+                                except (ValueError, TypeError):
+                                    continue
+                        waypoints = sanitized_waypoints
+                    else:
+                        waypoints = []
+                        
+                    sanitized_ruler = {
+                        "startX": float(payload.get("startX", 0)),
+                        "startY": float(payload.get("startY", 0)),
+                        "endX": float(payload.get("endX", 0)),
+                        "endY": float(payload.get("endY", 0)),
+                        "visible": bool(payload.get("visible", False)),
+                        "rulerType": str(payload.get("rulerType", "ray"))[:20],
+                        "rayWidth": float(payload.get("rayWidth", 1.0)),
+                        "waypoints": waypoints,
+                        "username": authenticated_username,
+                        "userId": authenticated_user_id
+                    }
+                    
+                    broadcast_message = json.dumps({
+                        "type": "UPDATE_RULER",
+                        "payload": sanitized_ruler
+                    })
+                    await _broadcast(current_room, broadcast_message, exclude=ws_obj)
  
             # 5. SET MAP (BROADCAST)
             elif msg_type == "SET_MAP" and current_room:
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
                 is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
                 
-                if is_master:
-                    room_current_map[current_room] = payload.get("url")
+                if is_master and isinstance(payload, dict):
+                    url_val = payload.get("url")
+                    if url_val is None:
+                        url_val = ""
+                    else:
+                        url_val = str(url_val)[:2048]
+                    
+                    # Convalida sicurezza URL (SSRF)
+                    from app.app_modules.base.utils import is_safe_url
+                    if url_val and not is_safe_url(url_val):
+                        await ws_obj.send(json.dumps({
+                            "type": "ERROR",
+                            "payload": {"message": "URL mappa non sicuro o non valido"}
+                        }))
+                        continue
+                        
+                    room_current_map[current_room] = url_val
                     broadcast_message = json.dumps({
                         "type": "SET_MAP",
-                        "payload": payload
+                        "payload": {"url": url_val}
                     })
                     await _broadcast(current_room, broadcast_message)
   
@@ -590,16 +691,22 @@ async def ws_endpoint():
 
             # 8.5 PING (BROADCAST)
             elif msg_type == "PING" and current_room:
-                broadcast_message = json.dumps({
-                    "type": "PING",
-                    "payload": {
-                        "x": payload.get("x"),
-                        "y": payload.get("y"),
-                        "username": authenticated_username,
-                        "color": payload.get("color", 0xa855f7)
-                    }
-                })
-                await _broadcast(current_room, broadcast_message)
+                if isinstance(payload, dict):
+                    x_val = payload.get("x")
+                    y_val = payload.get("y")
+                    
+                    if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
+                        if -10000 <= x_val <= 10000 and -10000 <= y_val <= 10000:
+                            broadcast_message = json.dumps({
+                                "type": "PING",
+                                "payload": {
+                                    "x": float(x_val),
+                                    "y": float(y_val),
+                                    "username": authenticated_username,
+                                    "color": int(payload.get("color", 0xa855f7))
+                                }
+                            })
+                            await _broadcast(current_room, broadcast_message)
 
             # 9. UPDATE WALLS (MASTER ONLY)
             elif msg_type == "UPDATE_WALLS" and current_room:
@@ -690,4 +797,15 @@ async def ws_endpoint():
                 
             if not connected_rooms[current_room]:
                 del connected_rooms[current_room]
+                
+                # Cleanup dei dizionari di stato della stanza per evitare memory leak (L4)
+                room_chat_history.pop(current_room, None)
+                room_grid_settings.pop(current_room, None)
+                room_current_map.pop(current_room, None)
+                room_tokens.pop(current_room, None)
+                room_templates.pop(current_room, None)
+                room_walls.pop(current_room, None)
+                room_fow_enabled.pop(current_room, None)
+                room_los_enabled.pop(current_room, None)
+                logger.info(f"Pulito completamente lo stato in memoria per la stanza vuota: {current_room}")
 

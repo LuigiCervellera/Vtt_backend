@@ -16,3 +16,11 @@ async def is_blacklisted(jti: str) -> bool:
     """Verifica se un JTI è nella blacklist."""
     from models import BlacklistedToken
     return await BlacklistedToken.filter(jti=jti).exists()
+
+
+async def clean_expired_blacklisted_tokens() -> int:
+    """Rimuove dal DB tutti i token blacklistati già scaduti."""
+    from models import BlacklistedToken
+    now = datetime.datetime.now(datetime.timezone.utc)
+    deleted_count = await BlacklistedToken.filter(expires_at__lt=now).delete()
+    return deleted_count
