@@ -2,12 +2,124 @@ import json
 import asyncio
 import jwt
 import logging
+import re
+import random
 
 logger = logging.getLogger(__name__)
 from quart import Blueprint, websocket
 from models import Campaign, User
 from app.app_modules.base.config import JWT_SECRET, JWT_ALGORITHM, MAX_WS_MESSAGE_SIZE
 from app.app_modules.auth.blacklist import is_blacklisted
+from app.app_modules.base.utils import is_safe_url
+
+
+def parse_and_roll_single(formula: str):
+    clean = formula.replace(" ", "")
+    # Check if constant
+    if re.match(r"^[+-]?\d+$", clean):
+        val = int(clean)
+        return {"results": [], "total": val, "modifier": val, "faces": 0}
+    
+    # Check if dice term
+    match = re.match(r"^([+-]?\d*)?[dD](\d+)([+-]\d+)?$", clean)
+    if match:
+        sign_str = match.group(1)
+        sign = -1 if (sign_str and sign_str.startswith("-")) else 1
+        
+        count_str = sign_str.replace("+", "").replace("-", "") if sign_str else "1"
+        if count_str == "":
+            count = 1
+        else:
+            count = int(count_str)
+        count = max(1, min(count, 100)) # Sane limits to prevent DoS
+        
+        faces = int(match.group(2))
+        faces = max(1, min(faces, 1000)) # Sane limits to prevent DoS
+        
+        modifier = int(match.group(3)) if match.group(3) else 0
+        
+        results = [random.randint(1, faces) for _ in range(count)]
+        total = sum(results) * sign + modifier
+        return {"results": results, "total": total, "modifier": modifier, "faces": faces}
+    
+    return {"results": [], "total": 0, "modifier": 0, "faces": 0}
+
+
+def roll_expression(expression: str, sources=None):
+    if sources and isinstance(sources, list) and len(sources) > 0:
+        rolled_sources = []
+        total = 0
+        results = []
+        modifier = 0
+        faces = 20
+        
+        for src in sources[:10]:
+            if not isinstance(src, dict):
+                continue
+            formula = str(src.get("formula", ""))[:50]
+            rolled = parse_and_roll_single(formula)
+            
+            rolled_sources.append({
+                "name": str(src.get("name", ""))[:100],
+                "formula": formula,
+                "results": rolled["results"],
+                "total": rolled["total"],
+                "modifier": rolled["modifier"],
+                "type": str(src.get("type", "base"))[:20]
+            })
+            total += rolled["total"]
+            results.extend(rolled["results"])
+            
+            if len(rolled["results"]) == 0:
+                modifier += rolled["modifier"]
+                
+            if src.get("type") == "base" and rolled["faces"]:
+                faces = rolled["faces"]
+                
+        return {
+            "results": results,
+            "total": total,
+            "modifier": modifier,
+            "faces": faces,
+            "sources": rolled_sources
+        }
+    else:
+        # Split expression into terms
+        terms = re.findall(r"([+-]?[^+-]+)", expression.replace(" ", ""))
+        if not terms:
+            terms = [expression]
+            
+        rolled_sources = []
+        total = 0
+        results = []
+        modifier = 0
+        faces = 20
+        
+        for idx, term in enumerate(terms[:10]):
+            rolled = parse_and_roll_single(term)
+            rolled_sources.append({
+                "name": "Base" if idx == 0 else f"Modificatore {idx}",
+                "formula": term,
+                "results": rolled["results"],
+                "total": rolled["total"],
+                "modifier": rolled["modifier"],
+                "type": 'base' if idx == 0 else 'effect'
+            })
+            total += rolled["total"]
+            results.extend(rolled["results"])
+            if len(rolled["results"]) == 0:
+                modifier += rolled["modifier"]
+                
+            if idx == 0 and rolled["faces"]:
+                faces = rolled["faces"]
+                
+        return {
+            "results": results,
+            "total": total,
+            "modifier": modifier,
+            "faces": faces,
+            "sources": rolled_sources
+        }
 
 
 ws_bp = Blueprint("ws", __name__)
@@ -22,6 +134,76 @@ room_templates = {}
 room_walls = {}
 room_fow_enabled = {}
 room_los_enabled = {}
+room_initiative = {}
+
+# Throttling e salvataggio periodico dello stato per evitare DDoS / rallentamenti
+dirty_campaigns = set()
+background_loop_task = None
+
+async def _save_campaign_state_immediate(room_id: str):
+    """
+    Salva immediatamente lo stato in memoria di una stanza nel database.
+    """
+    try:
+        campaign_id = int(room_id)
+        campaign = await Campaign.get_or_none(id=campaign_id)
+        if not campaign:
+            return
+            
+        updated = False
+        if room_current_map.get(room_id) is not None:
+            campaign.current_map_url = room_current_map[room_id]
+            updated = True
+        if room_grid_settings.get(room_id) is not None:
+            campaign.grid_settings = room_grid_settings[room_id]
+            updated = True
+        if room_tokens.get(room_id) is not None:
+            campaign.tokens = room_tokens[room_id]
+            updated = True
+        if room_templates.get(room_id) is not None:
+            campaign.templates = room_templates[room_id]
+            updated = True
+        if room_walls.get(room_id) is not None:
+            campaign.walls = room_walls[room_id]
+            updated = True
+        if room_fow_enabled.get(room_id) is not None:
+            campaign.fow_enabled = room_fow_enabled[room_id]
+            updated = True
+        if room_los_enabled.get(room_id) is not None:
+            campaign.los_enabled = room_los_enabled[room_id]
+            updated = True
+        if room_initiative.get(room_id) is not None:
+            campaign.initiative = room_initiative[room_id]
+            updated = True
+        if room_chat_history.get(room_id) is not None:
+            campaign.chat_history = room_chat_history[room_id]
+            updated = True
+            
+        if updated:
+            await campaign.save()
+            logger.info(f"Stato della stanza {room_id} persistito con successo nel database.")
+    except Exception as e:
+        logger.error(f"Errore durante il salvataggio immediato per la stanza {room_id}: {e}", exc_info=True)
+
+async def _save_dirty_campaigns_loop():
+    """
+    Ciclo in background che salva ogni 5 secondi tutte le campagne modificate.
+    """
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            if not dirty_campaigns:
+                continue
+                
+            to_save = list(dirty_campaigns)
+            dirty_campaigns.clear()
+            
+            for room_id in to_save:
+                await _save_campaign_state_immediate(room_id)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Errore nel loop di salvataggio dello stato tabletop: {e}", exc_info=True)
 
 
 async def _broadcast(room_id: str, message: str, exclude=None):
@@ -49,6 +231,68 @@ async def _broadcast(room_id: str, message: str, exclude=None):
     # Rimozione sicura dei client disconnessi o eccessivamente lenti
     for client in stale_clients:
         connected_rooms[room_id].pop(client, None)
+
+
+async def _broadcast_initiative(room_id: str):
+    """
+    Spedisce lo stato del tracker iniziativa a tutti i client connessi.
+    I master ricevono lo stato completo (inclusi i nemici nascosti).
+    I giocatori ricevono solo i token visibili, mappando l'indice del turno attivo.
+    """
+    if room_id not in connected_rooms or room_id not in room_initiative:
+        return
+    
+    init_state = room_initiative[room_id]
+    master_msg = json.dumps({
+        "type": "UPDATE_INITIATIVE",
+        "payload": init_state
+    })
+    
+    clients = list(connected_rooms[room_id].keys())
+    tasks = []
+    
+    for client in clients:
+        client_info = connected_rooms[room_id].get(client)
+        if not client_info:
+            continue
+            
+        if client_info.get("is_master"):
+            tasks.append(asyncio.wait_for(client.send(master_msg), timeout=2.0))
+        else:
+            full_order = init_state.get("order", [])
+            filtered_order = []
+            player_active_idx = None
+            
+            for idx, item in enumerate(full_order):
+                if item.get("is_visible", True):
+                    filtered_order.append(item)
+                    if idx == init_state.get("active_idx"):
+                        player_active_idx = len(filtered_order) - 1
+                else:
+                    if idx == init_state.get("active_idx"):
+                        player_active_idx = None
+            
+            player_state = {
+                "active": init_state.get("active", False),
+                "round": init_state.get("round", 1),
+                "active_idx": player_active_idx,
+                "order": filtered_order
+            }
+            
+            player_msg = json.dumps({
+                "type": "UPDATE_INITIATIVE",
+                "payload": player_state
+            })
+            tasks.append(asyncio.wait_for(client.send(player_msg), timeout=2.0))
+            
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        stale_clients = []
+        for client, result in zip(clients, results):
+            if isinstance(result, Exception):
+                stale_clients.append(client)
+        for client in stale_clients:
+            connected_rooms[room_id].pop(client, None)
 
 
 async def _check_campaign_membership(user_id: int, campaign_id: int) -> tuple[bool, bool]:
@@ -216,14 +460,47 @@ async def ws_endpoint():
                 }
                 logger.info(f"-> Utente {username} entrato nella stanza: {current_room}")
                 
-                if current_room not in room_chat_history:
-                    room_chat_history[current_room] = []
-                    
+                # Avvio del loop in background per il salvataggio se non ancora attivo
+                global background_loop_task
+                if background_loop_task is None or background_loop_task.done():
+                    background_loop_task = asyncio.create_task(_save_dirty_campaigns_loop())
+
+                # Carica lo stato della stanza dal database se non è ancora caricato in memoria
                 if current_room not in room_tokens:
-                    # Inizializza un token di default per la stanza (MVP)
-                    room_tokens[current_room] = {
-                        "test-token": {"x": 200, "y": 200, "color": 0xa855f7}
-                    }
+                    campaign = await Campaign.get_or_none(id=campaign_id)
+                    if campaign:
+                        room_chat_history[current_room] = campaign.chat_history if campaign.chat_history is not None else []
+                        room_tokens[current_room] = campaign.tokens if campaign.tokens is not None else {
+                            "test-token": {"x": 200, "y": 200, "color": 0xa855f7}
+                        }
+                        if campaign.grid_settings is not None:
+                            room_grid_settings[current_room] = campaign.grid_settings
+                        if campaign.current_map_url is not None:
+                            room_current_map[current_room] = campaign.current_map_url
+                        if campaign.templates is not None:
+                            room_templates[current_room] = campaign.templates
+                        if campaign.walls is not None:
+                            room_walls[current_room] = campaign.walls
+                        room_fow_enabled[current_room] = campaign.fow_enabled
+                        room_los_enabled[current_room] = campaign.los_enabled
+                        room_initiative[current_room] = campaign.initiative if campaign.initiative is not None else {
+                            "active": False,
+                            "round": 1,
+                            "active_idx": 0,
+                            "order": []
+                        }
+                    else:
+                        room_chat_history[current_room] = []
+                        room_tokens[current_room] = {
+                            "test-token": {"x": 200, "y": 200, "color": 0xa855f7}
+                        }
+                        room_initiative[current_room] = {
+                            "active": False,
+                            "round": 1,
+                            "active_idx": 0,
+                            "order": []
+                        }
+
                     
                 # Invia lo storico della chat al nuovo utente
                 history_message = json.dumps({
@@ -232,10 +509,15 @@ async def ws_endpoint():
                 })
                 await ws_obj.send(history_message)
                 
-                # Invia i token correnti
+                # Invia i token correnti (filtrando quelli nascosti per i giocatori semplici)
+                tokens_to_send = {}
+                for t_id, t_data in room_tokens[current_room].items():
+                    if is_master or (not t_data.get("is_hidden") and not t_data.get("hidden")) or (str(t_data.get("owner_id")) == str(user_id)):
+                        tokens_to_send[t_id] = t_data
+
                 tokens_message = json.dumps({
                     "type": "SYNC_TOKENS",
-                    "payload": {"tokens": room_tokens[current_room]}
+                    "payload": {"tokens": tokens_to_send}
                 })
                 await ws_obj.send(tokens_message)
                 
@@ -281,8 +563,47 @@ async def ws_endpoint():
                 })
                 await ws_obj.send(fow_message)
                 
+                # Inizializza lo stato dell'iniziativa per la stanza se non esiste (MVP)
+                if current_room not in room_initiative:
+                    room_initiative[current_room] = {
+                        "active": False,
+                        "round": 1,
+                        "active_idx": 0,
+                        "order": []
+                    }
+                
+                # Invia lo stato dell'iniziativa corrente al nuovo utente (filtrato per ruolo)
+                init_state = room_initiative[current_room]
+                if is_master:
+                    await ws_obj.send(json.dumps({
+                        "type": "UPDATE_INITIATIVE",
+                        "payload": init_state
+                    }))
+                else:
+                    full_order = init_state.get("order", [])
+                    filtered_order = []
+                    player_active_idx = None
+                    for idx, item in enumerate(full_order):
+                        if item.get("is_visible", True):
+                            filtered_order.append(item)
+                            if idx == init_state.get("active_idx"):
+                                player_active_idx = len(filtered_order) - 1
+                        else:
+                            if idx == init_state.get("active_idx"):
+                                player_active_idx = None
+                    player_state = {
+                        "active": init_state.get("active", False),
+                        "round": init_state.get("round", 1),
+                        "active_idx": player_active_idx,
+                        "order": filtered_order
+                    }
+                    await ws_obj.send(json.dumps({
+                        "type": "UPDATE_INITIATIVE",
+                        "payload": player_state
+                    }))
+                
                 # Broadcast della lista giocatori aggiornata
-                players = [{"username": info["username"], "is_master": info["is_master"]} if isinstance(info, dict) else {"username": info, "is_master": False} for info in connected_rooms[current_room].values()]
+                players = [{"username": info["username"], "is_master": info["is_master"], "user_id": info.get("user_id")} if isinstance(info, dict) else {"username": info, "is_master": False, "user_id": None} for info in connected_rooms[current_room].values()]
                 broadcast_message = json.dumps({
                     "type": "UPDATE_PLAYERS",
                     "payload": {"players": players}
@@ -345,20 +666,48 @@ async def ws_endpoint():
                         room_tokens[current_room][token_id]["auraColor"] = payload.get("auraColor")
                     if "visionRadius" in payload:
                         room_tokens[current_room][token_id]["visionRadius"] = payload.get("visionRadius")
+                    if "url_avatar" in payload:
+                        url_avatar_val = payload.get("url_avatar")
+                        if url_avatar_val is None or (isinstance(url_avatar_val, str) and is_safe_url(url_avatar_val)):
+                            room_tokens[current_room][token_id]["url_avatar"] = url_avatar_val
 
+                    if "is_hidden" in payload and is_master:
+                        room_tokens[current_room][token_id]["is_hidden"] = bool(payload.get("is_hidden"))
+                    if "hidden" in payload and is_master:
+                        room_tokens[current_room][token_id]["hidden"] = bool(payload.get("hidden"))
+
+                    dirty_campaigns.add(current_room)
+ 
                     # Arricchiamo il payload broadcasted con colore e owner_id per garantire consistenza.
                     # Forza SEMPRE l'owner_id dello stato del server per prevenire spoofing / furti di token.
                     token_data = room_tokens[current_room][token_id]
                     if "color" not in payload and "color" in token_data:
                         payload["color"] = token_data["color"]
+                    if "url_avatar" not in payload and "url_avatar" in token_data:
+                        payload["url_avatar"] = token_data["url_avatar"]
+                    if "is_hidden" in token_data:
+                        payload["is_hidden"] = token_data["is_hidden"]
                     
                     payload["owner_id"] = token_data.get("owner_id")
-
+ 
                     broadcast_message = json.dumps({
                         "type": "MOVE_TOKEN",
                         "payload": payload
                     })
-                    await _broadcast(current_room, broadcast_message, exclude=ws_obj)
+
+                    # Se il token è nascosto, invia solo ai Master e al proprietario del token
+                    if token_data.get("is_hidden") or token_data.get("hidden"):
+                        for client_ws, client_info in list(connected_rooms.get(current_room, {}).items()):
+                            if client_ws != ws_obj:
+                                c_is_master = client_info.get("is_master", False) if isinstance(client_info, dict) else False
+                                c_user_id = client_info.get("user_id") if isinstance(client_info, dict) else None
+                                if c_is_master or (c_user_id and str(c_user_id) == str(token_data.get("owner_id"))):
+                                    try:
+                                        await asyncio.wait_for(client_ws.send(broadcast_message), timeout=2.0)
+                                    except Exception:
+                                        pass
+                    else:
+                        await _broadcast(current_room, broadcast_message, exclude=ws_obj)
                 else:
                     # Notifica il client del fallimento dell'autorizzazione
                     await ws_obj.send(json.dumps({
@@ -388,6 +737,7 @@ async def ws_endpoint():
                         
                         if is_master or is_owner:
                             del room_tokens[current_room][token_id]
+                            dirty_campaigns.add(current_room)
                             
                             broadcast_message = json.dumps({
                                 "type": "REMOVE_TOKEN",
@@ -433,42 +783,85 @@ async def ws_endpoint():
 
                     if sanitized_chat["isRoll"] and isinstance(payload.get("rollDetails"), dict):
                         rd = payload["rollDetails"]
-                        results = rd.get("results", [])
-                        if isinstance(results, list):
-                            results = [int(r) for r in results[:100] if isinstance(r, (int, float))]
-                        else:
-                            results = []
-
+                        formula = str(rd.get("formula", ""))[:50]
+                        sources = rd.get("sources")
+                        
+                        # Evaluate / Roll expression on the server to prevent faking rolls (anti-cheat)
+                        server_roll = roll_expression(formula, sources)
+                        
                         sanitized_chat["rollDetails"] = {
-                            "formula": str(rd.get("formula", ""))[:50],
-                            "results": results,
-                            "modifier": int(rd.get("modifier", 0)),
-                            "total": int(rd.get("total", 0)),
-                            "faces": int(rd.get("faces", 20))
+                            "formula": formula,
+                            "results": server_roll["results"],
+                            "modifier": server_roll["modifier"],
+                            "total": server_roll["total"],
+                            "faces": server_roll["faces"]
                         }
+                        
+                        if sources:
+                            sanitized_chat["rollDetails"]["sources"] = server_roll["sources"]
 
-                        sources = rd.get("sources", [])
-                        if isinstance(sources, list):
-                            sanitized_sources = []
-                            for s in sources[:10]: # Max 10 sub-sources
-                                if isinstance(s, dict):
-                                    s_results = s.get("results", [])
-                                    if isinstance(s_results, list):
-                                        s_results = [int(r) for r in s_results[:100] if isinstance(r, (int, float))]
-                                    else:
-                                        s_results = []
-                                    sanitized_sources.append({
-                                        "formula": str(s.get("formula", ""))[:50],
-                                        "results": s_results,
-                                        "modifier": int(s.get("modifier", 0)),
-                                        "total": int(s.get("total", 0)),
-                                        "type": str(s.get("type", "base"))[:20]
+                        # Anti-cheat Initiative Auto-Update
+                        # Se il tiro è per l'Iniziativa, il server calcola il valore reale e aggiorna direttamente il tracker
+                        reason = text_val
+                        if reason and (reason == "Tiro per l'Iniziativa" or "iniziativa" in reason.lower()):
+                            # Trova il token posseduto dall'utente in questa stanza
+                            owned_token_id = None
+                            owned_token_name = None
+                            
+                            if current_room in room_tokens:
+                                for t_id, t_data in room_tokens[current_room].items():
+                                    if str(t_data.get("owner_id")) == str(authenticated_user_id):
+                                        owned_token_id = t_id
+                                        owned_token_name = t_data.get("name")
+                                        break
+                                        
+                            if current_room not in room_initiative:
+                                room_initiative[current_room] = {
+                                    "active": False,
+                                    "round": 1,
+                                    "active_idx": 0,
+                                    "order": []
+                                }
+                                
+                            initiative_total = server_roll["total"]
+                            order = room_initiative[current_room]["order"]
+                            updated = False
+                            
+                            if owned_token_id:
+                                for row in order:
+                                    if row.get("tokenId") == owned_token_id:
+                                        row["initiative"] = initiative_total
+                                        updated = True
+                                        break
+                                if not updated:
+                                    order.append({
+                                        "tokenId": owned_token_id,
+                                        "name": owned_token_name or authenticated_username,
+                                        "initiative": initiative_total
                                     })
-                            sanitized_chat["rollDetails"]["sources"] = sanitized_sources
+                            else:
+                                player_row_id = f"player-{authenticated_user_id}"
+                                for row in order:
+                                    if row.get("id") == player_row_id:
+                                        row["initiative"] = initiative_total
+                                        updated = True
+                                        break
+                                if not updated:
+                                    order.append({
+                                        "id": player_row_id,
+                                        "name": authenticated_username,
+                                        "initiative": initiative_total
+                                    })
+                                    
+                            order.sort(key=lambda x: x.get("initiative", 0), reverse=True)
+                            dirty_campaigns.add(current_room)
+                            await _broadcast_initiative(current_room)
 
                     room_chat_history[current_room].append(sanitized_chat)
                     if len(room_chat_history[current_room]) > 100:
                         room_chat_history[current_room] = room_chat_history[current_room][-100:]
+                    
+                    dirty_campaigns.add(current_room)
                         
                     broadcast_message = json.dumps({
                         "type": "CHAT_MESSAGE",
@@ -493,6 +886,8 @@ async def ws_endpoint():
                     }
                     
                     room_grid_settings[current_room] = sanitized_grid
+                    dirty_campaigns.add(current_room)
+                    
                     broadcast_message = json.dumps({
                         "type": "GRID_SETTINGS",
                         "payload": sanitized_grid
@@ -547,8 +942,6 @@ async def ws_endpoint():
                     else:
                         url_val = str(url_val)[:2048]
                     
-                    # Convalida sicurezza URL (SSRF)
-                    from app.app_modules.base.utils import is_safe_url
                     if url_val and not is_safe_url(url_val):
                         await ws_obj.send(json.dumps({
                             "type": "ERROR",
@@ -557,6 +950,8 @@ async def ws_endpoint():
                         continue
                         
                     room_current_map[current_room] = url_val
+                    dirty_campaigns.add(current_room)
+                    
                     broadcast_message = json.dumps({
                         "type": "SET_MAP",
                         "payload": {"url": url_val}
@@ -572,6 +967,8 @@ async def ws_endpoint():
                     room_tokens[current_room] = {}
                     # Pulisce anche i template persistenti quando si ripulisce la mappa
                     room_templates[current_room] = []
+                    dirty_campaigns.add(current_room)
+                    
                     broadcast_message = json.dumps({
                         "type": "CLEAR_MAP",
                         "payload": {}
@@ -661,6 +1058,8 @@ async def ws_endpoint():
                             continue
 
                     room_templates[current_room] = sanitized_templates
+                    dirty_campaigns.add(current_room)
+                    
                     broadcast_message = json.dumps({
                         "type": "UPDATE_TEMPLATES",
                         "payload": {"templates": sanitized_templates}
@@ -733,6 +1132,8 @@ async def ws_endpoint():
                                 continue
                         
                         room_walls[current_room] = sanitized_walls
+                        dirty_campaigns.add(current_room)
+                        
                         broadcast_message = json.dumps({
                             "type": "UPDATE_WALLS",
                             "payload": {"walls": sanitized_walls}
@@ -759,6 +1160,7 @@ async def ws_endpoint():
                     los_enabled = payload.get("losEnabled", True)
                     room_fow_enabled[current_room] = enabled
                     room_los_enabled[current_room] = los_enabled
+                    dirty_campaigns.add(current_room)
                     
                     broadcast_message = json.dumps({
                         "type": "UPDATE_FOW_SETTINGS",
@@ -773,6 +1175,188 @@ async def ws_endpoint():
                         "type": "ERROR",
                         "payload": {"message": "Solo il Master può modificare le impostazioni della nebbia di guerra"}
                     }))
+
+            # 11. UPDATE INITIATIVE STATE (MASTER ONLY)
+            elif msg_type == "UPDATE_INITIATIVE_STATE" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    active = payload.get("active", False)
+                    round_val = payload.get("round", 1)
+                    active_idx = payload.get("active_idx", 0)
+                    order = payload.get("order", [])
+                    
+                    # Security checks: bounds clamping & type validation
+                    if not isinstance(active, bool):
+                        active = False
+                    if not isinstance(round_val, int) or not (1 <= round_val <= 10000):
+                        round_val = 1
+                    if active_idx is not None:
+                        if not isinstance(active_idx, int) or active_idx < 0 or active_idx > 200:
+                            active_idx = 0
+                    if not isinstance(order, list) or len(order) > 200:
+                        order = []
+                        
+                    sanitized_order = []
+                    for item in order:
+                        if not isinstance(item, dict):
+                            continue
+                        name_str = str(item.get("name", ""))[:50]
+                        # Remove potentially harmful characters for XSS
+                        name_str = name_str.replace("<", "&lt;").replace(">", "&gt;")
+                        
+                        init_val = item.get("initiative", 0)
+                        if not isinstance(init_val, (int, float)):
+                            init_val = 0
+                        # Clamp initiative values between -100 and 100
+                        init_val = max(-100.0, min(100.0, float(init_val)))
+                        
+                        sanitized_order.append({
+                            "id": str(item.get("id", ""))[:50],
+                            "tokenId": str(item.get("tokenId", ""))[:50] if item.get("tokenId") else None,
+                            "name": name_str,
+                            "initiative": init_val,
+                            "is_visible": bool(item.get("is_visible", True)),
+                            "is_npc": bool(item.get("is_npc", False)),
+                            "owner_id": item.get("owner_id")
+                        })
+                        
+                    room_initiative[current_room] = {
+                        "active": active,
+                        "round": round_val,
+                        "active_idx": active_idx,
+                        "order": sanitized_order
+                    }
+                    dirty_campaigns.add(current_room)
+                    await _broadcast_initiative(current_room)
+                else:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Solo il Master può aggiornare lo stato del combattimento"}
+                    }))
+
+            # 12. UPDATE INITIATIVE ROW (MASTER OR TOKEN OWNER)
+            elif msg_type == "UPDATE_INITIATIVE_ROW" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                user_id = user_info.get("user_id") if isinstance(user_info, dict) else None
+                
+                token_id = payload.get("tokenId")
+                init_val = payload.get("initiative", 0)
+                
+                # Validation
+                if not isinstance(init_val, (int, float)):
+                    init_val = 0
+                init_val = max(-100.0, min(100.0, float(init_val)))
+                
+                if current_room not in room_initiative:
+                    room_initiative[current_room] = {
+                        "active": False,
+                        "round": 1,
+                        "active_idx": 0,
+                        "order": []
+                    }
+                
+                is_authorized = False
+                token_data = None
+                
+                # Check token ownership in room_tokens
+                if token_id and current_room in room_tokens:
+                    token_data = room_tokens[current_room].get(token_id)
+                    if token_data:
+                        owner_id = token_data.get("owner_id")
+                        is_owner = (str(owner_id) == str(user_id)) if owner_id and user_id else False
+                        if is_master or is_owner:
+                            is_authorized = True
+                
+                # Alternatively, Master can add custom non-token entries
+                if is_master and not token_data:
+                    is_authorized = True
+                    
+                if is_authorized:
+                    order = room_initiative[current_room].setdefault("order", [])
+                    
+                    # Find if it already exists by tokenId (or by ID if it's a custom Master entry)
+                    existing_item = None
+                    target_id = payload.get("id") or token_id
+                    
+                    for item in order:
+                        if (token_id and item.get("tokenId") == token_id) or (target_id and item.get("id") == target_id):
+                            existing_item = item
+                            break
+                            
+                    if existing_item:
+                        existing_item["initiative"] = init_val
+                        # Only GM can change visibility or name
+                        if is_master:
+                            if "is_visible" in payload:
+                                existing_item["is_visible"] = bool(payload["is_visible"])
+                            if "name" in payload:
+                                name_str = str(payload["name"])[:50].replace("<", "&lt;").replace(">", "&gt;")
+                                existing_item["name"] = name_str
+                    else:
+                        # Check list limit to prevent memory exhaustion DoS
+                        if len(order) >= 200:
+                            await ws_obj.send(json.dumps({
+                                "type": "ERROR",
+                                "payload": {"message": "Limite massimo di righe dell'iniziativa superato"}
+                            }))
+                            continue
+                            
+                        name_str = str(payload.get("name", "Entità"))[:50].replace("<", "&lt;").replace(">", "&gt;")
+                        is_visible = bool(payload.get("is_visible", True)) if is_master else True
+                        is_npc = bool(payload.get("is_npc", False)) if is_master else False
+                        owner_id = token_data.get("owner_id") if token_data else user_id
+                        
+                        order.append({
+                            "id": str(target_id)[:50],
+                            "tokenId": str(token_id)[:50] if token_id else None,
+                            "name": name_str,
+                            "initiative": init_val,
+                            "is_visible": is_visible,
+                            "is_npc": is_npc,
+                            "owner_id": owner_id
+                        })
+                        
+                    dirty_campaigns.add(current_room)
+                    await _broadcast_initiative(current_room)
+                else:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Non sei autorizzato ad aggiungere o aggiornare questa iniziativa"}
+                    }))
+
+            # 13. REMOVE INITIATIVE ROW (MASTER ONLY)
+            elif msg_type == "REMOVE_INITIATIVE_ROW" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                
+                if is_master:
+                    target_id = payload.get("id")
+                    token_id = payload.get("tokenId")
+                    
+                    if current_room in room_initiative:
+                        order = room_initiative[current_room].get("order", [])
+                        new_order = []
+                        for item in order:
+                            if (token_id and item.get("tokenId") == token_id) or (target_id and item.get("id") == target_id):
+                                continue
+                            new_order.append(item)
+                        room_initiative[current_room]["order"] = new_order
+                        
+                        # Adjust active_idx if out of bounds
+                        active_idx = room_initiative[current_room].get("active_idx", 0)
+                        if active_idx >= len(new_order) and len(new_order) > 0:
+                            room_initiative[current_room]["active_idx"] = len(new_order) - 1
+                            
+                        dirty_campaigns.add(current_room)
+                        await _broadcast_initiative(current_room)
+                else:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Solo il Master può rimuovere righe dall'iniziativa"}
+                    }))
   
     except asyncio.CancelledError:
         # Gestisce la disconnessione pulita del browser (es. chiusura scheda)
@@ -784,7 +1368,7 @@ async def ws_endpoint():
             logger.info(f"<- Un utente ha lasciato la stanza: {current_room}")
             
             try:
-                players = [{"username": info["username"], "is_master": info["is_master"]} if isinstance(info, dict) else {"username": info, "is_master": False} for info in connected_rooms[current_room].values()]
+                players = [{"username": info["username"], "is_master": info["is_master"], "user_id": info.get("user_id")} if isinstance(info, dict) else {"username": info, "is_master": False, "user_id": None} for info in connected_rooms[current_room].values()]
                 broadcast_message = json.dumps({
                     "type": "UPDATE_PLAYERS",
                     "payload": {"players": players}
@@ -798,6 +1382,11 @@ async def ws_endpoint():
             if not connected_rooms[current_room]:
                 del connected_rooms[current_room]
                 
+                # Salvataggio immediato dello stato finale prima della rimozione dei dati in memoria
+                await _save_campaign_state_immediate(current_room)
+                if current_room in dirty_campaigns:
+                    dirty_campaigns.remove(current_room)
+                
                 # Cleanup dei dizionari di stato della stanza per evitare memory leak (L4)
                 room_chat_history.pop(current_room, None)
                 room_grid_settings.pop(current_room, None)
@@ -807,5 +1396,6 @@ async def ws_endpoint():
                 room_walls.pop(current_room, None)
                 room_fow_enabled.pop(current_room, None)
                 room_los_enabled.pop(current_room, None)
+                room_initiative.pop(current_room, None)
                 logger.info(f"Pulito completamente lo stato in memoria per la stanza vuota: {current_room}")
 

@@ -44,6 +44,17 @@ class Campaign(Model):
 
     system_id = fields.CharField(max_length=50, default="generic")
 
+    # Stato persistente del tabellone di gioco (Tabletop)
+    current_map_url = fields.CharField(max_length=1024, null=True)
+    grid_settings = fields.JSONField(null=True)
+    tokens = fields.JSONField(null=True)
+    templates = fields.JSONField(null=True)
+    walls = fields.JSONField(null=True)
+    fow_enabled = fields.BooleanField(default=True)
+    los_enabled = fields.BooleanField(default=True)
+    initiative = fields.JSONField(null=True)
+    chat_history = fields.JSONField(null=True)
+
     class Meta:  # type: ignore
         table = "campaigns"
 

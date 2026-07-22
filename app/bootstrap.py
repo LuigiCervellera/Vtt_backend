@@ -31,10 +31,12 @@ def create_app() -> Quart:
     # Configure Swagger/OpenAPI Schema
     QuartSchema(app, info={"title": "VTT API", "version": "1.0.0"})
     
-    # Root status endpoint
+    # Root & Health status endpoints (for load balancers & container healthchecks)
     @app.route("/")
+    @app.route("/health")
+    @app.route("/api/health")
     async def index():
-        return {"status": "VTT Backend is running!"}
+        return {"status": "ok", "service": "VTT Backend", "version": "1.0.0"}, 200
         
     # Register blueprints
     app.register_blueprint(auth_bp)
@@ -43,6 +45,16 @@ def create_app() -> Quart:
     app.register_blueprint(maps_bp)
     app.register_blueprint(characters_bp)
     app.register_blueprint(ws_bp)
+    
+    # Global Exception Handler (Rule #4: Safe Exceptions)
+    @app.errorhandler(Exception)
+    async def handle_global_exception(e):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            # Lascia passare le eccezioni HTTP standard (404, 405, etc.) per gestore predefinito
+            return e
+        logger.error(f"Errore non gestito: {e}", exc_info=True)
+        return {"error": "Errore interno del server"}, 500
     
     # Lifecycle Hooks
     @app.before_serving

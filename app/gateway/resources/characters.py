@@ -5,6 +5,12 @@ from app.app_modules.auth.decorators import jwt_required
 from app.app_modules.characters.schemas import CharacterCreate, CharacterUpdate
 from app.app_modules.characters.validation import sanitize_scheda_dati, SchedaValidationError
 from app.app_modules.base.utils import is_safe_url
+import os
+import uuid
+from werkzeug.utils import secure_filename
+from quart import request
+from app.app_modules.base.config import UPLOAD_FOLDER, ALLOWED_EXTENSIONS, MAX_UPLOAD_SIZE
+from app.gateway.resources.maps import _validate_image_magic_bytes
 
 characters_bp = Blueprint("characters", __name__, url_prefix="/api/characters")
 
@@ -59,13 +65,18 @@ async def create_character(data: CharacterCreate):
         proprietario = await User.get_or_none(id=user_id)
         is_npc = False
 
+    try:
+        scheda_dati_sanitized = sanitize_scheda_dati(data.scheda_dati or {})
+    except SchedaValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
     c = await Character.create(
         campagna=campaign,
         nome=data.nome,
         is_npc=is_npc,
         proprietario=proprietario,
         url_avatar=data.url_avatar,
-        scheda_dati=data.scheda_dati or {}
+        scheda_dati=scheda_dati_sanitized
     )
     return jsonify({"message": "Personaggio creato", "id": c.id}), 201
 
@@ -97,7 +108,10 @@ async def update_character(character_id: int, data: CharacterUpdate):
     if data.url_avatar is not None:
         character.url_avatar = data.url_avatar
     if data.scheda_dati is not None:
-        character.scheda_dati = data.scheda_dati
+        try:
+            character.scheda_dati = sanitize_scheda_dati(data.scheda_dati)
+        except SchedaValidationError as e:
+            return jsonify({"error": str(e)}), 400
 
     await character.save()
     return jsonify({"message": "Personaggio aggiornato", "id": character.id}), 200
@@ -120,3 +134,48 @@ async def delete_character(character_id: int):
 
     await character.delete()
     return jsonify({"message": "Personaggio eliminato"}), 200
+
+@characters_bp.route("/upload-avatar", methods=["POST"])
+@tag(["characters"])
+@jwt_required
+async def upload_avatar():
+    # Verifica Content-Length prima di leggere la richiesta
+    content_length = request.content_length
+    if content_length is not None and content_length > MAX_UPLOAD_SIZE:
+        return jsonify({"error": "File troppo grande. Max 5MB"}), 413
+
+    files = await request.files
+    if 'avatar' not in files:
+        return jsonify({"error": "Nessuna immagine caricata"}), 400
+    
+    file = files['avatar']
+    if file.filename == '':
+        return jsonify({"error": "Nome file vuoto"}), 400
+    
+    # Validazione estensione file
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": f"Tipo file non permesso. Ammessi: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
+        
+    if file:
+        # Leggi solo fino al limite massimo consentito + 1 per prevenire l'esaurimento della memoria
+        file_data = file.read(MAX_UPLOAD_SIZE + 1)
+        if len(file_data) > MAX_UPLOAD_SIZE:
+            return jsonify({"error": "File troppo grande. Max 5MB"}), 413
+
+        # Validazione magic bytes — verifica che il contenuto sia un'immagine reale
+        detected_ext = _validate_image_magic_bytes(file_data)
+        if detected_ext is None:
+            return jsonify({"error": "Il file non è un'immagine valida. Il contenuto non corrisponde a PNG, JPEG o WebP"}), 400
+
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        
+        # Salva il file su disco
+        with open(file_path, "wb") as f:
+            f.write(file_data)
+            
+        # Ritorna l'URL relativo per accedere al file tramite l'endpoint /uploads/<filename> esistente
+        file_url = f"/uploads/{unique_filename}"
+        return jsonify({"message": "Avatar caricato con successo", "url": file_url}), 201

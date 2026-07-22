@@ -151,7 +151,6 @@ async def upload_map():
         with open(file_path, "wb") as f:
             f.write(file_data)
         
-        base_url = os.getenv("BASE_URL", "http://127.0.0.1:5000")
-        url = f"{base_url}/uploads/{unique_filename}"
-        return jsonify({"url": url}), 200
+        file_url = f"/uploads/{unique_filename}"
+        return jsonify({"url": file_url}), 200
 
