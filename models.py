@@ -55,6 +55,10 @@ class Campaign(Model):
     initiative = fields.JSONField(null=True)
     chat_history = fields.JSONField(null=True)
 
+    # Gestione Multi-Scena / Mappe multiple
+    scenes = fields.JSONField(null=True)
+    active_scene_id = fields.CharField(max_length=100, null=True)
+
     class Meta:  # type: ignore
         table = "campaigns"
 

@@ -4,6 +4,7 @@ import jwt
 import logging
 import re
 import random
+import time
 
 logger = logging.getLogger(__name__)
 from quart import Blueprint, websocket
@@ -13,36 +14,51 @@ from app.app_modules.auth.blacklist import is_blacklisted
 from app.app_modules.base.utils import is_safe_url
 
 
-def parse_and_roll_single(formula: str):
+from typing import TypedDict, List, Optional
+
+class RollResult(TypedDict):
+    results: List[int]
+    total: int
+    modifier: int
+    faces: int
+    keep: Optional[str]
+
+
+def parse_and_roll_single(formula: str) -> RollResult:
     clean = formula.replace(" ", "")
     # Check if constant
     if re.match(r"^[+-]?\d+$", clean):
         val = int(clean)
-        return {"results": [], "total": val, "modifier": val, "faces": 0}
+        return {"results": [], "total": val, "modifier": val, "faces": 0, "keep": None}
     
-    # Check if dice term
-    match = re.match(r"^([+-]?\d*)?[dD](\d+)([+-]\d+)?$", clean)
+    # Check if dice term (supports kh1 and kl1 for advantage/disadvantage)
+    match = re.match(r"^([+-]?\d*)?[dD](\d+)(kh1|kl1)?([+-]\d+)?$", clean, re.IGNORECASE)
     if match:
         sign_str = match.group(1)
         sign = -1 if (sign_str and sign_str.startswith("-")) else 1
         
         count_str = sign_str.replace("+", "").replace("-", "") if sign_str else "1"
-        if count_str == "":
-            count = 1
-        else:
-            count = int(count_str)
+        count = int(count_str) if count_str else 1
         count = max(1, min(count, 100)) # Sane limits to prevent DoS
         
         faces = int(match.group(2))
         faces = max(1, min(faces, 1000)) # Sane limits to prevent DoS
         
-        modifier = int(match.group(3)) if match.group(3) else 0
+        keep_mode = match.group(3).lower() if match.group(3) else None
+        modifier = int(match.group(4)) if match.group(4) else 0
         
         results = [random.randint(1, faces) for _ in range(count)]
-        total = sum(results) * sign + modifier
-        return {"results": results, "total": total, "modifier": modifier, "faces": faces}
+        if keep_mode == "kh1":
+            total = (max(results) if results else 0) * sign + modifier
+        elif keep_mode == "kl1":
+            total = (min(results) if results else 0) * sign + modifier
+        else:
+            total = sum(results) * sign + modifier
+
+        return {"results": results, "total": total, "modifier": modifier, "faces": faces, "keep": keep_mode}
     
-    return {"results": [], "total": 0, "modifier": 0, "faces": 0}
+    return {"results": [], "total": 0, "modifier": 0, "faces": 0, "keep": None}
+
 
 
 def roll_expression(expression: str, sources=None):
@@ -135,6 +151,8 @@ room_walls = {}
 room_fow_enabled = {}
 room_los_enabled = {}
 room_initiative = {}
+room_scenes = {}
+room_active_scene_id = {}
 
 # Throttling e salvataggio periodico dello stato per evitare DDoS / rallentamenti
 dirty_campaigns = set()
@@ -177,6 +195,12 @@ async def _save_campaign_state_immediate(room_id: str):
             updated = True
         if room_chat_history.get(room_id) is not None:
             campaign.chat_history = room_chat_history[room_id]
+            updated = True
+        if room_scenes.get(room_id) is not None:
+            campaign.scenes = room_scenes[room_id]
+            updated = True
+        if room_active_scene_id.get(room_id) is not None:
+            campaign.active_scene_id = room_active_scene_id[room_id]
             updated = True
             
         if updated:
@@ -439,6 +463,7 @@ async def ws_endpoint():
                     continue
 
                 is_member, is_master = await _check_campaign_membership(user_id, campaign_id)
+                user_is_master = is_master
                 if not is_member:
                     await ws_obj.send(json.dumps({
                         "type": "ERROR",
@@ -489,6 +514,27 @@ async def ws_endpoint():
                             "active_idx": 0,
                             "order": []
                         }
+
+                        # Inizializza le scene se non presenti nel DB
+                        if campaign.scenes and isinstance(campaign.scenes, list) and len(campaign.scenes) > 0:
+                            room_scenes[current_room] = campaign.scenes
+                            room_active_scene_id[current_room] = campaign.active_scene_id or campaign.scenes[0]["id"]
+                        else:
+                            def_scene_id = "scene-default-1"
+                            def_scene = {
+                                "id": def_scene_id,
+                                "name": "Mappa Principale",
+                                "url": campaign.current_map_url or "",
+                                "grid_settings": campaign.grid_settings or {"gridSize": 60, "gridColumns": 50, "snapToGrid": True, "gridVisible": True},
+                                "tokens": campaign.tokens or {},
+                                "walls": campaign.walls or [],
+                                "templates": campaign.templates or [],
+                                "fow_enabled": campaign.fow_enabled if campaign.fow_enabled is not None else True,
+                                "los_enabled": campaign.los_enabled if campaign.los_enabled is not None else True,
+                                "is_active": True
+                            }
+                            room_scenes[current_room] = [def_scene]
+                            room_active_scene_id[current_room] = def_scene_id
                     else:
                         room_chat_history[current_room] = []
                         room_tokens[current_room] = {
@@ -500,12 +546,47 @@ async def ws_endpoint():
                             "active_idx": 0,
                             "order": []
                         }
+                        def_scene_id = "scene-default-1"
+                        def_scene = {
+                            "id": def_scene_id,
+                            "name": "Mappa Principale",
+                            "url": "",
+                            "grid_settings": {"gridSize": 60, "gridColumns": 50, "snapToGrid": True, "gridVisible": True},
+                            "tokens": room_tokens[current_room],
+                            "walls": [],
+                            "templates": [],
+                            "fow_enabled": True,
+                            "los_enabled": True,
+                            "is_active": True
+                        }
+                        room_scenes[current_room] = [def_scene]
+                        room_active_scene_id[current_room] = def_scene_id
+
+                # Invia l'elenco delle scene della stanza
+                if current_room in room_scenes:
+                    scenes_message = json.dumps({
+                        "type": "UPDATE_SCENES",
+                        "payload": {
+                            "scenes": room_scenes[current_room],
+                            "activeSceneId": room_active_scene_id.get(current_room)
+                        }
+                    })
+                    await ws_obj.send(scenes_message)
 
                     
-                # Invia lo storico della chat al nuovo utente
+                # Invia lo storico della chat al nuovo utente (filtrando i tiri privati per gli utenti non autorizzati)
+                filtered_history = []
+                for msg in room_chat_history.get(current_room, []):
+                    if isinstance(msg, dict) and (msg.get("isPrivate") or msg.get("is_private")):
+                        msg_user_id = msg.get("userId")
+                        if is_master or (msg_user_id and str(msg_user_id) == str(user_id)):
+                            filtered_history.append(msg)
+                    else:
+                        filtered_history.append(msg)
+
                 history_message = json.dumps({
                     "type": "CHAT_HISTORY",
-                    "payload": {"messages": room_chat_history[current_room]}
+                    "payload": {"messages": filtered_history}
                 })
                 await ws_obj.send(history_message)
                 
@@ -767,6 +848,8 @@ async def ws_endpoint():
                     else:
                         text_val = str(text_val)[:2000] # Limite a 2000 caratteri
 
+                    is_private_val = bool(payload.get("isPrivate") or payload.get("is_private") or payload.get("rollVisibility") == "private")
+
                     sanitized_chat = {
                         "id": payload.get("id", int(asyncio.get_event_loop().time() * 1000)),
                         "roomId": str(payload.get("roomId", ""))[:50],
@@ -776,6 +859,7 @@ async def ws_endpoint():
                         "isSystem": bool(payload.get("isSystem", False)),
                         "isRoll": bool(payload.get("isRoll", False)),
                         "isCard": bool(payload.get("isCard", False)),
+                        "isPrivate": is_private_val,
                     }
 
                     if "cardTitle" in payload:
@@ -867,7 +951,19 @@ async def ws_endpoint():
                         "type": "CHAT_MESSAGE",
                         "payload": sanitized_chat
                     })
-                    await _broadcast(current_room, broadcast_message)
+
+                    # Se il messaggio/tiro è privato, invia SOLO all'autore e ai Master della stanza
+                    if is_private_val:
+                        for client_ws, client_info in list(connected_rooms.get(current_room, {}).items()):
+                            c_is_master = client_info.get("is_master", False) if isinstance(client_info, dict) else False
+                            c_user_id = client_info.get("user_id") if isinstance(client_info, dict) else None
+                            if c_is_master or (c_user_id and str(c_user_id) == str(authenticated_user_id)):
+                                try:
+                                    await asyncio.wait_for(client_ws.send(broadcast_message), timeout=2.0)
+                                except Exception:
+                                    pass
+                    else:
+                        await _broadcast(current_room, broadcast_message)
                     
             # 4. GRID SETTINGS (BROADCAST)
             elif msg_type == "GRID_SETTINGS" and current_room:
@@ -935,7 +1031,14 @@ async def ws_endpoint():
                 user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
                 is_master = user_info.get("is_master", False) if isinstance(user_info, dict) else False
                 
-                if is_master and isinstance(payload, dict):
+                if not is_master:
+                    await ws_obj.send(json.dumps({
+                        "type": "ERROR",
+                        "payload": {"message": "Solo il Master della campagna può cambiare la mappa."}
+                    }))
+                    continue
+
+                if isinstance(payload, dict):
                     url_val = payload.get("url")
                     if url_val is None:
                         url_val = ""
@@ -950,6 +1053,12 @@ async def ws_endpoint():
                         continue
                         
                     room_current_map[current_room] = url_val
+                    curr_act_id = room_active_scene_id.get(current_room)
+                    if curr_act_id and current_room in room_scenes:
+                        for s in room_scenes[current_room]:
+                            if s.get("id") == curr_act_id:
+                                s["url"] = url_val
+                                break
                     dirty_campaigns.add(current_room)
                     
                     broadcast_message = json.dumps({
@@ -957,6 +1066,15 @@ async def ws_endpoint():
                         "payload": {"url": url_val}
                     })
                     await _broadcast(current_room, broadcast_message)
+
+                    if current_room in room_scenes:
+                        await _broadcast(current_room, json.dumps({
+                            "type": "UPDATE_SCENES",
+                            "payload": {
+                                "scenes": room_scenes[current_room],
+                                "activeSceneId": room_active_scene_id.get(current_room)
+                            }
+                        }))
   
             # 6. CLEAR MAP (BROADCAST)
             elif msg_type == "CLEAR_MAP" and current_room:
@@ -981,6 +1099,257 @@ async def ws_endpoint():
                         "payload": {"templates": []}
                     })
                     await _broadcast(current_room, broadcast_templates)
+
+            # 6b. CREATE SCENE (MASTER ONLY, ANTI-DOS CLAMPED TO MAX 20 SCENES)
+            elif msg_type == "CREATE_SCENE" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master_check = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                if not is_master_check:
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Solo il Master può creare nuove scene."}}))
+                    continue
+
+                scenes_list = room_scenes.setdefault(current_room, [])
+                if len(scenes_list) >= 20:
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Raggiunto il limite massimo di 20 scene per campagna."}}))
+                    continue
+
+                if isinstance(payload, dict):
+                    scene_name = str(payload.get("name", "Nuova Scena"))[:100].strip() or "Nuova Scena"
+                    map_url = str(payload.get("url", ""))[:2048]
+                    if map_url and not is_safe_url(map_url):
+                        await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "URL mappa non sicuro."}}))
+                        continue
+
+                    # Salva lo stato della vecchia scena attiva
+                    curr_active_id = room_active_scene_id.get(current_room)
+                    if curr_active_id:
+                        for s in scenes_list:
+                            if s.get("id") == curr_active_id:
+                                s["url"] = room_current_map.get(current_room, "")
+                                s["grid_settings"] = room_grid_settings.get(current_room, {})
+                                s["tokens"] = room_tokens.get(current_room, {})
+                                s["walls"] = room_walls.get(current_room, [])
+                                s["templates"] = room_templates.get(current_room, [])
+                                s["fow_enabled"] = room_fow_enabled.get(current_room, True)
+                                s["los_enabled"] = room_los_enabled.get(current_room, True)
+                                s["is_active"] = False
+                                break
+
+                    new_scene_id = f"scene-{int(asyncio.get_event_loop().time() * 1000)}"
+                    new_scene = {
+                        "id": new_scene_id,
+                        "name": scene_name,
+                        "url": map_url,
+                        "grid_settings": {"gridSize": 60, "gridColumns": 50, "snapToGrid": True, "gridVisible": True},
+                        "tokens": {},
+                        "walls": [],
+                        "templates": [],
+                        "fow_enabled": True,
+                        "los_enabled": True,
+                        "is_active": True
+                    }
+                    scenes_list.append(new_scene)
+                    room_active_scene_id[current_room] = new_scene_id
+
+                    # Aggiorna lo stato in memoria della stanza
+                    room_current_map[current_room] = map_url
+                    room_grid_settings[current_room] = new_scene["grid_settings"]
+                    room_tokens[current_room] = {}
+                    room_walls[current_room] = []
+                    room_templates[current_room] = []
+                    room_fow_enabled[current_room] = True
+                    room_los_enabled[current_room] = True
+
+                    dirty_campaigns.add(current_room)
+
+                    # Broadcast elenco scene aggiornato
+                    await _broadcast(current_room, json.dumps({
+                        "type": "UPDATE_SCENES",
+                        "payload": {
+                            "scenes": scenes_list,
+                            "activeSceneId": new_scene_id
+                        }
+                    }))
+
+                    # Broadcast switch alla nuova scena attiva
+                    await _broadcast(current_room, json.dumps({
+                        "type": "SWITCH_SCENE",
+                        "payload": {
+                            "sceneId": new_scene_id,
+                            "name": scene_name,
+                            "url": map_url,
+                            "gridSettings": new_scene["grid_settings"],
+                            "tokens": {},
+                            "walls": [],
+                            "templates": [],
+                            "fowEnabled": True,
+                            "losEnabled": True
+                        }
+                    }))
+
+            # 6c. SWITCH SCENE (MASTER ONLY)
+            elif msg_type == "SWITCH_SCENE" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master_check = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                if not is_master_check:
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Solo il Master può attivare una scena."}}))
+                    continue
+
+                if isinstance(payload, dict):
+                    target_scene_id = str(payload.get("sceneId", ""))
+                    scenes_list = room_scenes.get(current_room, [])
+                    
+                    # Salva lo stato della scena corrente prima dello switch
+                    curr_active_id = room_active_scene_id.get(current_room)
+                    if curr_active_id:
+                        for s in scenes_list:
+                            if s.get("id") == curr_active_id:
+                                s["url"] = room_current_map.get(current_room, "")
+                                s["grid_settings"] = room_grid_settings.get(current_room, {})
+                                s["tokens"] = room_tokens.get(current_room, {})
+                                s["walls"] = room_walls.get(current_room, [])
+                                s["templates"] = room_templates.get(current_room, [])
+                                s["fow_enabled"] = room_fow_enabled.get(current_room, True)
+                                s["los_enabled"] = room_los_enabled.get(current_room, True)
+                                s["is_active"] = False
+                                break
+
+                    # Cerca la nuova scena
+                    target_scene = next((s for s in scenes_list if s.get("id") == target_scene_id), None)
+                    if not target_scene:
+                        await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Scena richiesta non trovata."}}))
+                        continue
+
+                    target_scene["is_active"] = True
+                    room_active_scene_id[current_room] = target_scene_id
+
+                    # Carica lo stato della nuova scena nella memoria della stanza
+                    room_current_map[current_room] = target_scene.get("url", "")
+                    room_grid_settings[current_room] = target_scene.get("grid_settings", {"gridSize": 60, "gridColumns": 50, "snapToGrid": True, "gridVisible": True})
+                    room_tokens[current_room] = target_scene.get("tokens", {})
+                    room_walls[current_room] = target_scene.get("walls", [])
+                    room_templates[current_room] = target_scene.get("templates", [])
+                    room_fow_enabled[current_room] = target_scene.get("fow_enabled", True)
+                    room_los_enabled[current_room] = target_scene.get("los_enabled", True)
+
+                    dirty_campaigns.add(current_room)
+
+                    # Broadcast elenco scene aggiornato
+                    await _broadcast(current_room, json.dumps({
+                        "type": "UPDATE_SCENES",
+                        "payload": {
+                            "scenes": scenes_list,
+                            "activeSceneId": target_scene_id
+                        }
+                    }))
+
+                    # Broadcast stato nuova scena attiva per sincronizzare tutti i client
+                    await _broadcast(current_room, json.dumps({
+                        "type": "SWITCH_SCENE",
+                        "payload": {
+                            "sceneId": target_scene_id,
+                            "name": target_scene.get("name", "Scena"),
+                            "url": target_scene.get("url", ""),
+                            "gridSettings": room_grid_settings[current_room],
+                            "tokens": room_tokens[current_room],
+                            "walls": room_walls[current_room],
+                            "templates": room_templates[current_room],
+                            "fowEnabled": room_fow_enabled[current_room],
+                            "losEnabled": room_los_enabled[current_room]
+                        }
+                    }))
+
+            # 6d. DELETE SCENE (MASTER ONLY)
+            elif msg_type == "DELETE_SCENE" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master_check = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                if not is_master_check:
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Solo il Master può eliminare scene."}}))
+                    continue
+
+                if isinstance(payload, dict):
+                    scene_id_to_delete = str(payload.get("sceneId", ""))
+                    scenes_list = room_scenes.get(current_room, [])
+                    if len(scenes_list) <= 1:
+                        await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Impossibile eliminare l'unica scena rimasta nella campagna."}}))
+                        continue
+
+                    is_deleting_active = (scene_id_to_delete == room_active_scene_id.get(current_room))
+                    remaining_scenes = [s for s in scenes_list if s.get("id") != scene_id_to_delete]
+                    room_scenes[current_room] = remaining_scenes
+
+                    if is_deleting_active and remaining_scenes:
+                        next_scene = remaining_scenes[0]
+                        next_scene["is_active"] = True
+                        target_scene_id = next_scene["id"]
+                        room_active_scene_id[current_room] = target_scene_id
+
+                        room_current_map[current_room] = next_scene.get("url", "")
+                        room_grid_settings[current_room] = next_scene.get("grid_settings", {"gridSize": 60, "gridColumns": 50, "snapToGrid": True, "gridVisible": True})
+                        room_tokens[current_room] = next_scene.get("tokens", {})
+                        room_walls[current_room] = next_scene.get("walls", [])
+                        room_templates[current_room] = next_scene.get("templates", [])
+                        room_fow_enabled[current_room] = next_scene.get("fow_enabled", True)
+                        room_los_enabled[current_room] = next_scene.get("los_enabled", True)
+
+                        dirty_campaigns.add(current_room)
+
+                        await _broadcast(current_room, json.dumps({
+                            "type": "UPDATE_SCENES",
+                            "payload": {
+                                "scenes": remaining_scenes,
+                                "activeSceneId": target_scene_id
+                            }
+                        }))
+
+                        await _broadcast(current_room, json.dumps({
+                            "type": "SWITCH_SCENE",
+                            "payload": {
+                                "sceneId": target_scene_id,
+                                "name": next_scene.get("name", "Scena"),
+                                "url": next_scene.get("url", ""),
+                                "gridSettings": room_grid_settings[current_room],
+                                "tokens": room_tokens[current_room],
+                                "walls": room_walls[current_room],
+                                "templates": room_templates[current_room],
+                                "fowEnabled": room_fow_enabled[current_room],
+                                "losEnabled": room_los_enabled[current_room]
+                            }
+                        }))
+                    else:
+                        dirty_campaigns.add(current_room)
+                        await _broadcast(current_room, json.dumps({
+                            "type": "UPDATE_SCENES",
+                            "payload": {
+                                "scenes": remaining_scenes,
+                                "activeSceneId": room_active_scene_id.get(current_room)
+                            }
+                        }))
+
+            # 6e. RENAME SCENE (MASTER ONLY)
+            elif msg_type == "RENAME_SCENE" and current_room:
+                user_info = connected_rooms.get(current_room, {}).get(ws_obj, {})
+                is_master_check = user_info.get("is_master", False) if isinstance(user_info, dict) else False
+                if not is_master_check:
+                    await ws_obj.send(json.dumps({"type": "ERROR", "payload": {"message": "Solo il Master può rinominare le scene."}}))
+                    continue
+
+                if isinstance(payload, dict):
+                    scene_id = str(payload.get("sceneId", ""))
+                    new_name = str(payload.get("name", ""))[:100].strip()
+                    if new_name and scene_id:
+                        for s in room_scenes.get(current_room, []):
+                            if s.get("id") == scene_id:
+                                s["name"] = new_name
+                                break
+                        dirty_campaigns.add(current_room)
+                        await _broadcast(current_room, json.dumps({
+                            "type": "UPDATE_SCENES",
+                            "payload": {
+                                "scenes": room_scenes.get(current_room, []),
+                                "activeSceneId": room_active_scene_id.get(current_room)
+                            }
+                        }))
             
             # 7. UPDATE TEMPLATES (BROADCAST WITH SECURITY VALIDATION)
             elif msg_type == "UPDATE_TEMPLATES" and current_room:
