@@ -6,6 +6,7 @@ class User(Model):
     id = fields.IntField(pk=True)
     username = fields.CharField(max_length=50, unique=True)
     email = fields.CharField(max_length=255, unique=True, null=True)
+    is_email_verified = fields.BooleanField(default=False)
     password_hash = fields.CharField(max_length=256)
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -13,6 +14,7 @@ class User(Model):
     campaigns_mastered: fields.ReverseRelation["Campaign"]
     campaigns_joined: fields.ManyToManyRelation["Campaign"]
     characters: fields.ReverseRelation["Character"]
+    verification_tokens: fields.ReverseRelation["EmailVerificationToken"]
 
     class Meta:  # type: ignore
         table = "users"
@@ -25,6 +27,7 @@ class User(Model):
 
     def __str__(self):
         return self.username
+
 
 class Campaign(Model):
     id = fields.IntField(pk=True)
@@ -65,6 +68,7 @@ class Campaign(Model):
     def __str__(self):
         return self.nome_campagna
 
+
 class Map(Model):
     id = fields.IntField(pk=True)
     campagna: fields.ForeignKeyRelation[Campaign] = fields.ForeignKeyField(
@@ -80,6 +84,7 @@ class Map(Model):
 
     def __str__(self):
         return self.nome_mappa
+
 
 class Character(Model):
     id = fields.IntField(pk=True)
@@ -114,3 +119,20 @@ class BlacklistedToken(Model):
 
     def __str__(self):
         return self.jti
+
+
+class EmailVerificationToken(Model):
+    id = fields.IntField(pk=True)
+    token = fields.CharField(max_length=64, unique=True, index=True)
+    user: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
+        "models.User", related_name="verification_tokens"
+    )
+    user_id: int
+    created_at = fields.DatetimeField(auto_now_add=True)
+    expires_at = fields.DatetimeField()
+
+    class Meta:  # type: ignore
+        table = "email_verification_tokens"
+
+    def __str__(self):
+        return f"Token verification for user {self.user_id}"

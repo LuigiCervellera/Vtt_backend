@@ -18,7 +18,9 @@ async def init_db():
         )
         print("Generating schemas...")
         await Tortoise.generate_schemas()
-        print("Schemas generated successfully!")
+        conn = Tortoise.get_connection("default")
+        await conn.execute_script("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN DEFAULT FALSE;")
+        print("Schemas and column migrations executed successfully!")
     except Exception as e:
         print(f"Error: {e}")
     finally:

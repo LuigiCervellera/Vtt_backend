@@ -61,5 +61,13 @@ COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "Lax")
 # Proxy trust configuration for rate limiting
 TRUST_PROXY = os.getenv("TRUST_PROXY", "False").lower() in ("true", "1", "yes")
 
+# SMTP & Transactional Email configuration
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "noreply@wizvtt.com")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
 
 

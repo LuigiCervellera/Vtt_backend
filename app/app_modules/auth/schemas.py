@@ -1,9 +1,24 @@
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class AuthRequest:
     username: str
     password: str
+
+@dataclass
+class RegisterRequest:
+    username: str
+    password: str
+    email: Optional[str] = None
+
+@dataclass
+class VerifyEmailRequest:
+    token: str
+
+@dataclass
+class ResendVerificationRequest:
+    email: str
 
 @dataclass
 class UpdateUsernameRequest:
